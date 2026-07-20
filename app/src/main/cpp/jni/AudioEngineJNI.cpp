@@ -170,4 +170,16 @@ Java_com_audiopro_djmrec_audio_AudioEngine_setWaveformEnabled(
     JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
     UsbAudioEngine::instance().setWaveformEnabled(enabled == JNI_TRUE);
 }
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setGainDb(
+    JNIEnv* /*env*/, jobject /*thiz*/, jfloat db) {
+    UsbAudioEngine::instance().setGainDb(db);
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setMonitoringEnabled(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    UsbAudioEngine::instance().setMonitoringEnabled(enabled == JNI_TRUE);
+}
 } // extern "C"

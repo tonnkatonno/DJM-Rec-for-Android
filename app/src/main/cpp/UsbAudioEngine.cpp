@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <android/log.h>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
@@ -132,6 +133,7 @@ int UsbAudioEngine::open(int32_t audioManagerDeviceId, int32_t sampleRateHint, i
     }
 
     mStreamOpen.store(true, std::memory_order_release);
+    startMonitorStreamIfEnabled();
     LOGI("AAudio input open: %d Hz, %d ch, actual format=%d, sharing=%s, perf=%s",
          mFormat.sampleRate, mFormat.channelCount, static_cast<int>(mOboeFormat),
          oboe::convertToText(mStream->getSharingMode()), oboe::convertToText(mStream->getPerformanceMode()));
@@ -195,6 +197,7 @@ int UsbAudioEngine::openUsbIso(const UsbIsoAudioSource::Config& isoConfig, int32
     mWaveformAnalyzer = std::make_unique<WaveformAnalyzer>(mFormat.sampleRate);
 
     mStreamOpen.store(true, std::memory_order_release);
+    startMonitorStreamIfEnabled();
     LOGI("USB iso capture open: %d Hz, 2ch extracted from a %dch wire "
          "format, format=I32 canonical",
             mFormat.sampleRate, isoConfig.totalChannels);
@@ -243,6 +246,7 @@ int UsbAudioEngine::openRootAlsa(const AlsaPcmAudioSource::Config& alsaConfig) {
     mRingBuffer = std::make_unique<RingBuffer>(ringBufferFrames * canonicalBytesPerFrame);
     mWaveformAnalyzer = std::make_unique<WaveformAnalyzer>(mFormat.sampleRate);
     mStreamOpen.store(true, std::memory_order_release);
+    startMonitorStreamIfEnabled();
 
     LOGI("Root ALSA capture open: hw:%d,%d @ %dHz, %dbit, native channels=%d, output stereo I32",
          alsaConfig.card, alsaConfig.device, mFormat.sampleRate, mFormat.bitsPerSample,
@@ -250,11 +254,21 @@ int UsbAudioEngine::openRootAlsa(const AlsaPcmAudioSource::Config& alsaConfig) {
     return mFormat.sampleRate;
 }
 
-void UsbAudioEngine::onUsbIsoFrames(const int32_t* interleavedStereo, size_t frameCount) {
+void UsbAudioEngine::onUsbIsoFrames(const int32_t* sourceInterleavedStereo, size_t frameCount) {
     // --- Invoked on UsbIsoAudioSource's libusb event thread: no blocking I/O below. ---
     // Mirrors the tail of onAudioReady() below -- meter update + optional ring-buffer write --
     // but always against a canonical, already-2-channel buffer (no per-format decode needed
     // here; UsbIsoAudioSource already produced left-justified, sign-extended int32 samples).
+    //
+    // sourceInterleavedStereo points into the source's own reused scratch buffer, so gain is
+    // applied into a local thread_local copy rather than mutating it in place.
+    static thread_local std::vector<int32_t> gained;
+    const size_t sampleCount = frameCount * 2;
+    if (gained.size() < sampleCount) gained.resize(sampleCount);
+    std::memcpy(gained.data(), sourceInterleavedStereo, sampleCount * sizeof(int32_t));
+    applyGain(gained.data(), sampleCount);
+    const int32_t* interleavedStereo = gained.data();
+
     const StereoMeterReading reading =
         MeterCalculator::analyze(interleavedStereo, static_cast<int32_t>(frameCount), oboe::AudioFormat::I32);
     mLeftPeakDb.store(reading.leftPeakDb, std::memory_order_relaxed);
@@ -266,6 +280,8 @@ void UsbAudioEngine::onUsbIsoFrames(const int32_t* interleavedStereo, size_t fra
     if (mWaveformEnabled.load(std::memory_order_relaxed) && mWaveformAnalyzer) {
         mWaveformAnalyzer->pushFrames(interleavedStereo, frameCount);
     }
+
+    feedMonitor(interleavedStereo, frameCount);
 
     if (mRecording.load(std::memory_order_relaxed) &&
         !mPaused.load(std::memory_order_relaxed) &&
@@ -279,8 +295,14 @@ void UsbAudioEngine::onUsbIsoFrames(const int32_t* interleavedStereo, size_t fra
     }
 }
 
-oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* /*stream*/, void* audioData,
+oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* stream, void* audioData,
                                                        int32_t numFrames) {
+    // mMonitorStream and the AAudio *input* stream (mStream) share this callback -- Oboe has no
+    // per-stream callback object here, so disambiguate by pointer identity.
+    if (stream == mMonitorStream.get()) {
+        return onMonitorAudioReady(audioData, numFrames);
+    }
+
     // --- REALTIME THREAD: no allocation after warmup, no locks, no blocking I/O below. ---
     static thread_local std::vector<int32_t> canonical;
     const size_t sampleCount = static_cast<size_t>(numFrames) * mChannelCount;
@@ -328,6 +350,8 @@ oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* /*strea
             break;
     }
 
+    applyGain(canonical.data(), sampleCount);
+
     // Live stereo metering — always computed, even while paused/stopped, so the UI VU meter
     // reflects the signal actually present at the mixer's output at all times.
     const StereoMeterReading reading =
@@ -337,6 +361,13 @@ oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* /*strea
     mRightPeakDb.store(reading.rightPeakDb, std::memory_order_relaxed);
     mRightRmsDb.store(reading.rightRmsDb, std::memory_order_relaxed);
     mClipping.store(reading.clipping, std::memory_order_relaxed);
+
+    // The monitor ring buffer/output stream hard-assume interleaved stereo (matching the other
+    // two capture paths, which are always exactly 2ch by construction); this AAudio path is the
+    // only one that could in principle negotiate a different channel count.
+    if (mChannelCount == 2) {
+        feedMonitor(canonical.data(), static_cast<size_t>(numFrames));
+    }
 
     mAaudioLeftPeakSinceLog = std::max(mAaudioLeftPeakSinceLog, reading.leftPeakDb);
     mAaudioRightPeakSinceLog = std::max(mAaudioRightPeakSinceLog, reading.rightPeakDb);
@@ -375,7 +406,21 @@ oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* /*strea
     return oboe::DataCallbackResult::Continue;
 }
 
-void UsbAudioEngine::onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result error) {
+void UsbAudioEngine::onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
+    // mMonitorStream and mStream share this callback; a monitor-only failure (e.g. a wired
+    // headset unplugged mid-session) must NOT be treated as the capture/recording stream dying.
+    if (stream == mMonitorStream.get()) {
+        LOGW("Monitor output stream closed unexpectedly: %s", oboe::convertToText(error));
+        // Oboe has already fully closed this stream by the time this fires (its contract), so
+        // no further callbacks can be in flight on it -- safe to drop the reference and reset
+        // the ring buffer without calling close() again.
+        mMonitorStream.reset();
+        mMonitoringEnabled.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> bufLock(mMonitorRingBufferMutex);
+        mMonitorRingBuffer.reset();
+        return;
+    }
+
     // Typically fired when the USB mixer is unplugged mid-session. We can't safely reopen
     // from this callback thread; flag state so the Kotlin layer can react (stop cleanly,
     // show "device disconnected") on its next status check.
@@ -453,6 +498,10 @@ void UsbAudioEngine::closeEngine() {
         mAlsaSource->stop();
         mAlsaSource.reset();
     }
+    // Monitoring's on/off *preference* (mMonitoringEnabled) deliberately survives this, same as
+    // mWaveformEnabled -- only the stream itself is torn down, so it comes back automatically
+    // on the next open*() call via startMonitorStreamIfEnabled().
+    stopMonitorStream();
     mRingBuffer.reset();
     mSourceMode = SourceMode::None;
     mStreamOpen.store(false, std::memory_order_release);
@@ -575,5 +624,162 @@ void UsbAudioEngine::setWaveformEnabled(bool enabled) {
     mWaveformEnabled.store(enabled, std::memory_order_release);
 }
 
+void UsbAudioEngine::setGainDb(float db) {
+    // +24dB covers "the mixer barely touches yellow" cases without inviting a gain that makes
+    // clipping the default outcome; -24dB is symmetric headroom the other way.
+    const float clamped = std::clamp(db, -24.0f, 24.0f);
+    const float linear = std::pow(10.0f, clamped / 20.0f);
+    mGainLinear.store(linear, std::memory_order_relaxed);
+}
+
+void UsbAudioEngine::applyGain(int32_t* samples, size_t sampleCount) const {
+    const float gain = mGainLinear.load(std::memory_order_relaxed);
+    if (gain == 1.0f) return; // unity: skip the pass entirely
+    constexpr float kMax = 2147483647.0f;
+    constexpr float kMin = -2147483648.0f;
+    for (size_t i = 0; i < sampleCount; ++i) {
+        const float scaled = static_cast<float>(samples[i]) * gain;
+        samples[i] = static_cast<int32_t>(std::clamp(scaled, kMin, kMax));
+    }
+}
+
+void UsbAudioEngine::setMonitoringEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mControlMutex);
+    if (enabled == mMonitoringEnabled.load(std::memory_order_relaxed)) return;
+    if (!enabled) {
+        mMonitoringEnabled.store(false, std::memory_order_release);
+        stopMonitorStream();
+        return;
+    }
+    mMonitoringEnabled.store(true, std::memory_order_release);
+    startMonitorStreamIfEnabled(); // no-op if no capture stream is open yet; retried on next open*()
+}
+
+void UsbAudioEngine::feedMonitor(const int32_t* interleavedStereo, size_t frameCount) {
+    if (!mMonitoringEnabled.load(std::memory_order_relaxed)) return;
+    std::unique_lock<std::mutex> lock(mMonitorRingBufferMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !mMonitorRingBuffer) return; // toggling right now, or not open yet
+    const size_t bytes = frameCount * 2 * sizeof(int32_t);
+    mMonitorRingBuffer->write(reinterpret_cast<const uint8_t*>(interleavedStereo), bytes);
+    // No xrun counting here -- a dropped monitor frame is a minor, self-correcting UX detail
+    // (the next callback just catches up), unlike the recording ring buffer where a drop is
+    // permanently lost audio.
+}
+
+void UsbAudioEngine::startMonitorStreamIfEnabled() {
+    // Caller must already hold mControlMutex.
+    if (!mMonitoringEnabled.load(std::memory_order_relaxed)) return;
+    if (mMonitorStream) return; // already running -- idempotent
+    if (mFormat.sampleRate <= 0) return; // no capture format finalized yet; retried on open*()
+
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Output)
+        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+        ->setSharingMode(oboe::SharingMode::Shared) // let AudioFlinger route to wired/BT headset normally
+        ->setSampleRate(mFormat.sampleRate)
+        ->setChannelCount(2)
+        ->setFormat(oboe::AudioFormat::I16)
+        ->setFormatConversionAllowed(true)
+        ->setChannelConversionAllowed(true)
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
+        ->setDataCallback(this)
+        ->setErrorCallback(this);
+
+    std::shared_ptr<oboe::AudioStream> stream;
+    const oboe::Result openResult = builder.openStream(stream);
+    if (openResult != oboe::Result::OK) {
+        LOGE("Monitor output stream open failed: %s", oboe::convertToText(openResult));
+        return;
+    }
+
+    mMonitorOboeFormat = stream->getFormat();
+    {
+        std::lock_guard<std::mutex> bufLock(mMonitorRingBufferMutex);
+        // ~400ms: generous headroom against scheduling jitter between the capture producer
+        // thread and this stream's own callback thread, without meaningfully adding to the
+        // monitoring latency for what this feature is for (hearing crackle/gain issues, not
+        // beat-matching by ear against the monitor output).
+        const size_t frames = static_cast<size_t>(mFormat.sampleRate) * 400 / 1000;
+        mMonitorRingBuffer = std::make_unique<RingBuffer>(frames * 2 * sizeof(int32_t));
+    }
+
+    const oboe::Result startResult = stream->requestStart();
+    if (startResult != oboe::Result::OK) {
+        LOGE("Monitor output stream start failed: %s", oboe::convertToText(startResult));
+        stream->close();
+        std::lock_guard<std::mutex> bufLock(mMonitorRingBufferMutex);
+        mMonitorRingBuffer.reset();
+        return;
+    }
+    mMonitorStream = stream;
+    LOGI("Live monitoring started: %d Hz, format=%d, sharing=%s",
+         mFormat.sampleRate, static_cast<int>(mMonitorOboeFormat),
+         oboe::convertToText(stream->getSharingMode()));
+}
+
+void UsbAudioEngine::stopMonitorStream() {
+    // Caller must already hold mControlMutex.
+    if (mMonitorStream) {
+        mMonitorStream->requestStop();
+        mMonitorStream->close(); // blocks until this stream's own callback thread fully stops --
+                                  // safe to reset the ring buffer right after, no thread can still
+                                  // be reading it.
+        mMonitorStream.reset();
+    }
+    std::lock_guard<std::mutex> bufLock(mMonitorRingBufferMutex);
+    mMonitorRingBuffer.reset();
+}
+
+oboe::DataCallbackResult UsbAudioEngine::onMonitorAudioReady(void* audioData, int32_t numFrames) {
+    // --- REALTIME THREAD (this stream's own callback thread): no blocking I/O below. ---
+    constexpr int32_t kChannels = 2;
+    const size_t sampleCount = static_cast<size_t>(numFrames) * kChannels;
+    static thread_local std::vector<int32_t> canonical;
+    if (canonical.size() < sampleCount) canonical.resize(sampleCount);
+
+    size_t gotSamples = 0;
+    {
+        std::unique_lock<std::mutex> lock(mMonitorRingBufferMutex, std::try_to_lock);
+        if (lock.owns_lock() && mMonitorRingBuffer) {
+            const size_t gotBytes = mMonitorRingBuffer->read(
+                reinterpret_cast<uint8_t*>(canonical.data()), sampleCount * sizeof(int32_t));
+            gotSamples = gotBytes / sizeof(int32_t);
+        }
+    }
+    // Underrun (buffer starved, or mid-toggle): pad with silence rather than stale/garbage data.
+    if (gotSamples < sampleCount) {
+        std::fill(canonical.begin() + static_cast<long>(gotSamples), canonical.begin() + static_cast<long>(sampleCount), 0);
+    }
+
+    switch (mMonitorOboeFormat) {
+        case oboe::AudioFormat::I16: {
+            auto* dst = static_cast<int16_t*>(audioData);
+            for (size_t i = 0; i < sampleCount; ++i) dst[i] = static_cast<int16_t>(canonical[i] >> 16);
+            break;
+        }
+        case oboe::AudioFormat::I24: {
+            auto* dst = static_cast<uint8_t*>(audioData);
+            for (size_t i = 0; i < sampleCount; ++i) {
+                const int32_t v = canonical[i] >> 8;
+                dst[i * 3] = static_cast<uint8_t>(v & 0xFF);
+                dst[i * 3 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+                dst[i * 3 + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+            }
+            break;
+        }
+        case oboe::AudioFormat::Float: {
+            auto* dst = static_cast<float*>(audioData);
+            for (size_t i = 0; i < sampleCount; ++i) {
+                dst[i] = static_cast<float>(canonical[i]) / 2147483648.0f;
+            }
+            break;
+        }
+        case oboe::AudioFormat::I32:
+        default:
+            std::memcpy(audioData, canonical.data(), sampleCount * sizeof(int32_t));
+            break;
+    }
+    return oboe::DataCallbackResult::Continue;
+}
 
 } // namespace djmrec

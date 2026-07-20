@@ -139,6 +139,10 @@ class RecordingService : LifecycleService() {
     @Volatile
     private var waveformEnabled = true
     private var waveformPollTick = 0
+    /** 0 == unlimited. Checked against [currentOutputFile]'s on-disk size, not a byte counter
+     *  from the native writer -- avoids adding a JNI surface just for this. */
+    @Volatile
+    private var maxFileSizeBytes: Long = 0L
 
     private val meterRunnable = object : Runnable {
         override fun run() {
@@ -156,6 +160,7 @@ class RecordingService : LifecycleService() {
                 if (waveformEnabled && waveformPollTick++ % 2 == 0) {
                     _waveformBins.value = AudioEngine.getWaveformBins()
                 }
+                checkMaxFileSize()
                 monitorHandler.postDelayed(this, METER_UPDATE_INTERVAL_MS)
             }
         }
@@ -188,6 +193,33 @@ class RecordingService : LifecycleService() {
         waveformPollTick = 0
         AudioEngine.setWaveformEnabled(enabled)
         if (!enabled) _waveformBins.value = emptyWaveform
+    }
+
+    fun setGainDb(db: Float) {
+        AudioEngine.setGainDb(db)
+    }
+
+    fun setMonitoringEnabled(enabled: Boolean) {
+        AudioEngine.setMonitoringEnabled(enabled)
+    }
+
+    /** [mb] in megabytes; 0 or less means unlimited. */
+    fun setMaxFileSizeMb(mb: Int) {
+        maxFileSizeBytes = if (mb <= 0) 0L else mb.toLong() * 1024L * 1024L
+    }
+
+    /** Auto-stops (finalizing the current file cleanly) once it crosses the configured limit --
+     *  same code path as pressing Stop, so the header gets patched and the take stays playable.
+     *  Polled from [meterRunnable] rather than tracked in the native writer to avoid adding a
+     *  JNI surface just for this. */
+    private fun checkMaxFileSize() {
+        if (maxFileSizeBytes <= 0L) return
+        if (_state.value !is RecordingState.Recording) return
+        val file = currentOutputFile ?: return
+        if (file.length() >= maxFileSizeBytes) {
+            Log.i(TAG, "Max file size ($maxFileSizeBytes bytes) reached -- auto-stopping take")
+            stopSession()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

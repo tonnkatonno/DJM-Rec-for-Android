@@ -79,6 +79,22 @@ public:
     void setWaveformEnabled(bool enabled);
     static constexpr int kWaveformBinCount = WaveformAnalyzer::kBinCount;
 
+    /** Linear input gain applied to every captured sample (all capture paths), before metering
+     *  and before it reaches the ring buffer/encoder -- so the VU meter and the recorded file
+     *  always agree on what "the signal" is. @p db is clamped to a sane range internally. */
+    void setGainDb(float db);
+
+    /**
+     * Live headphone/output monitoring of the (gained) captured signal, independent of
+     * recording -- lets the user *hear* crackle/clipping in real time to judge gain staging,
+     * not just watch the VU meter. Opens a second, low-latency Oboe output stream fed from a
+     * small dedicated ring buffer; standard Android output routing applies (wired/BT headset if
+     * connected, phone speaker otherwise). Safe to toggle at any time, including mid-recording
+     * and before any capture stream is open (takes effect once one opens).
+     */
+    void setMonitoringEnabled(bool enabled);
+    bool isMonitoringEnabled() const { return mMonitoringEnabled.load(std::memory_order_relaxed); }
+
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream, void* audioData, int32_t numFrames) override;
 
@@ -96,6 +112,33 @@ private:
      *  the libusb event thread by UsbIsoAudioSource's callback. */
     void onUsbIsoFrames(const int32_t* interleavedStereo, size_t frameCount);
 
+    /** Multiplies @p samples in place by the current gain and hard-clamps to int32 range.
+     *  A hard clamp (not a limiter) is deliberate: the point of exposing gain + live monitoring
+     *  is to let the user *hear* when they've pushed too far, the same way clipping on the
+     *  mixer's own meters is a real, audible signal -- silently limiting it away would hide
+     *  exactly what they're trying to check for. */
+    void applyGain(int32_t* samples, size_t sampleCount) const;
+
+    /** Feeds @p interleavedStereo (already gained) into the monitor ring buffer if monitoring
+     *  is currently enabled. Non-blocking (try_lock) -- called from realtime capture threads. */
+    void feedMonitor(const int32_t* interleavedStereo, size_t frameCount);
+
+    /** (Re)opens mMonitorStream at mFormat.sampleRate if monitoring is enabled -- called once a
+     *  capture stream's format is finalized (initial open, or after mFormat changes) so a
+     *  previously-enabled monitor keeps working across capture-source restarts. Must be called
+     *  while holding mControlMutex. */
+    void startMonitorStreamIfEnabled();
+
+    /** Tears down mMonitorStream + mMonitorRingBuffer without touching mMonitoringEnabled (the
+     *  user's on/off preference persists across this, same as mWaveformEnabled). Must be called
+     *  while holding mControlMutex. Safe to call whether or not a monitor stream is open. */
+    void stopMonitorStream();
+
+    /** oboe::AudioStreamDataCallback for mMonitorStream specifically (disambiguated from the
+     *  capture stream by pointer identity in onAudioReady). Pulls from the monitor ring buffer,
+     *  padding with silence on underrun rather than glitching. */
+    oboe::DataCallbackResult onMonitorAudioReady(void* audioData, int32_t numFrames);
+
     std::shared_ptr<oboe::AudioStream> mStream;
     std::unique_ptr<UsbIsoAudioSource> mUsbIsoSource;
     std::unique_ptr<AlsaPcmAudioSource> mAlsaSource;
@@ -111,6 +154,13 @@ private:
     std::atomic<bool> mPaused{false};
     std::atomic<bool> mStopRequested{false};
     std::atomic<bool> mWaveformEnabled{true};
+    std::atomic<float> mGainLinear{1.0f}; // 1.0 == 0dB unity; see setGainDb()
+
+    std::shared_ptr<oboe::AudioStream> mMonitorStream;
+    std::unique_ptr<RingBuffer> mMonitorRingBuffer;
+    std::mutex mMonitorRingBufferMutex; // guards mMonitorRingBuffer only; never held across close()
+    std::atomic<bool> mMonitoringEnabled{false};
+    oboe::AudioFormat mMonitorOboeFormat = oboe::AudioFormat::I16;
 
     AudioFormatInfo mFormat;
     oboe::AudioFormat mOboeFormat = oboe::AudioFormat::I32;

@@ -129,4 +129,20 @@ object AudioEngine {
 
     /** Enables native frequency analysis for the optional live waveform. */
     external fun setWaveformEnabled(enabled: Boolean)
+
+    /**
+     * Linear input gain applied to every captured sample, on every capture path, before
+     * metering and before it reaches the recorded file -- so the VU meter and the recording
+     * always agree. Takes effect immediately, including on an already-open stream. Clamped
+     * internally to +/-24dB.
+     */
+    external fun setGainDb(db: Float)
+
+    /**
+     * Live headphone/output monitoring of the (gained) captured signal, independent of
+     * recording -- lets the user hear crackle/clipping in real time. Standard Android output
+     * routing applies (wired/BT headset if connected, phone speaker otherwise). Safe to call
+     * at any time, including before a capture stream is open (takes effect once one opens).
+     */
+    external fun setMonitoringEnabled(enabled: Boolean)
 }

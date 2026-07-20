@@ -44,6 +44,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_FORCE_ANDROID_CAPTURE = "force_android_capture"
         private const val KEY_DJMREC_PORT_MODE = "djmrec_port_mode"
         private const val KEY_WAVEFORM_ENABLED = "waveform_enabled"
+        private const val KEY_GAIN_DB = "gain_db"
+        const val GAIN_DB_MIN = -24f
+        const val GAIN_DB_MAX = 24f
+        private const val KEY_MONITORING_ENABLED = "monitoring_enabled"
+        private const val KEY_MAX_FILE_SIZE_MB = "max_file_size_mb"
     }
 
     private val usbAudioManager = (application as DjmRecApplication).usbAudioManager
@@ -69,6 +74,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.getBoolean(KEY_WAVEFORM_ENABLED, true)
     )
     val waveformEnabled: StateFlow<Boolean> = _waveformEnabled.asStateFlow()
+
+    private val _gainDb = MutableStateFlow(prefs.getFloat(KEY_GAIN_DB, 0f))
+    val gainDb: StateFlow<Float> = _gainDb.asStateFlow()
+
+    private val _monitoringEnabled = MutableStateFlow(prefs.getBoolean(KEY_MONITORING_ENABLED, false))
+    val monitoringEnabled: StateFlow<Boolean> = _monitoringEnabled.asStateFlow()
+
+    /** 0 == unlimited. */
+    private val _maxFileSizeMb = MutableStateFlow(prefs.getInt(KEY_MAX_FILE_SIZE_MB, 0))
+    val maxFileSizeMb: StateFlow<Int> = _maxFileSizeMb.asStateFlow()
 
     private val _selectedFormat = MutableStateFlow(RecordingFormat.WAV)
     val selectedFormat: StateFlow<RecordingFormat> = _selectedFormat.asStateFlow()
@@ -98,6 +113,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             boundService = service
             isBound = true
             service.setWaveformEnabled(_waveformEnabled.value)
+            service.setGainDb(_gainDb.value)
+            service.setMonitoringEnabled(_monitoringEnabled.value)
+            service.setMaxFileSizeMb(_maxFileSizeMb.value)
             viewModelScope.launch { service.state.collect { _recordingState.value = it } }
             viewModelScope.launch { service.levels.collect { _levels.value = it } }
             viewModelScope.launch { service.elapsedMillis.collect { _elapsedMillis.value = it } }
@@ -159,6 +177,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _waveformEnabled.value = enabled
         if (!enabled) _waveformBins.value = emptyWaveform
         boundService?.setWaveformEnabled(enabled)
+    }
+
+    /** Applies immediately, including mid-recording -- the point is to hear the effect live. */
+    fun setGainDb(db: Float) {
+        val clamped = db.coerceIn(GAIN_DB_MIN, GAIN_DB_MAX)
+        prefs.edit().putFloat(KEY_GAIN_DB, clamped).apply()
+        _gainDb.value = clamped
+        boundService?.setGainDb(clamped)
+    }
+
+    /** Applies immediately, including mid-recording. Off by default -- opt-in, since enabling
+     *  it may play audio out loud through the phone speaker if no headset is connected. */
+    fun setMonitoringEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MONITORING_ENABLED, enabled).apply()
+        _monitoringEnabled.value = enabled
+        boundService?.setMonitoringEnabled(enabled)
+    }
+
+    /** [mb] 0 or less clears the limit (unlimited). Applies to the *next* file the encoder
+     *  opens as well as the current one -- safe to change mid-recording. */
+    fun setMaxFileSizeMb(mb: Int) {
+        val sanitized = mb.coerceAtLeast(0)
+        prefs.edit().putInt(KEY_MAX_FILE_SIZE_MB, sanitized).apply()
+        _maxFileSizeMb.value = sanitized
+        boundService?.setMaxFileSizeMb(sanitized)
     }
 
     fun rescanUsbDevices() {

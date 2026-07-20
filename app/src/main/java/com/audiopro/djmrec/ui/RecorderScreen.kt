@@ -23,7 +23,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,6 +44,7 @@ import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.ui.components.ChannelPairSelector
 import com.audiopro.djmrec.ui.components.DeviceStatusCard
 import com.audiopro.djmrec.ui.components.FormatSelector
+import com.audiopro.djmrec.ui.components.MaxFileSizeSelector
 import com.audiopro.djmrec.ui.components.RgbWaveform
 import com.audiopro.djmrec.ui.components.StereoVuMeter
 import com.audiopro.djmrec.ui.components.TransportControls
@@ -57,10 +60,13 @@ fun RecorderScreen(viewModel: MainViewModel) {
     val elapsedMillis by viewModel.elapsedMillis.collectAsState()
     val waveformBins by viewModel.waveformBins.collectAsState()
     val waveformEnabled by viewModel.waveformEnabled.collectAsState()
+    val gainDb by viewModel.gainDb.collectAsState()
+    val monitoringEnabled by viewModel.monitoringEnabled.collectAsState()
     val selectedFormat by viewModel.selectedFormat.collectAsState()
     val djmrecPortMode by viewModel.djmrecPortMode.collectAsState()
     val otgStatus by viewModel.otgStatus.collectAsState()
     val usbChannelOffset by viewModel.usbChannelOffset.collectAsState()
+    val maxFileSizeMb by viewModel.maxFileSizeMb.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(device?.deviceName) {
@@ -102,7 +108,11 @@ fun RecorderScreen(viewModel: MainViewModel) {
                 state = recordingState,
                 bins = waveformBins,
                 showWaveform = waveformEnabled,
-                levels = levels
+                levels = levels,
+                gainDb = gainDb,
+                onGainChanged = viewModel::setGainDb,
+                monitoringEnabled = monitoringEnabled,
+                onMonitoringChanged = viewModel::setMonitoringEnabled
             )
 
             if (recordingState is RecordingState.Error) {
@@ -129,7 +139,9 @@ fun RecorderScreen(viewModel: MainViewModel) {
                 device = device,
                 onRescan = viewModel::rescanUsbDevices,
                 channelOffset = usbChannelOffset,
-                onChannelOffsetSelected = viewModel::setUsbChannelOffset
+                onChannelOffsetSelected = viewModel::setUsbChannelOffset,
+                maxFileSizeMb = maxFileSizeMb,
+                onMaxFileSizeSelected = viewModel::setMaxFileSizeMb
             )
         }
 
@@ -149,7 +161,11 @@ private fun SignalSection(
     state: RecordingState,
     bins: FloatArray,
     showWaveform: Boolean,
-    levels: com.audiopro.djmrec.audio.StereoLevels
+    levels: com.audiopro.djmrec.audio.StereoLevels,
+    gainDb: Float,
+    onGainChanged: (Float) -> Unit,
+    monitoringEnabled: Boolean,
+    onMonitoringChanged: (Boolean) -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -188,6 +204,52 @@ private fun SignalSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             StereoVuMeter(levels = levels)
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "INPUT GAIN",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    if (gainDb == 0f) "0 dB" else "%+.1f dB".format(gainDb),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Slider(
+                value = gainDb,
+                onValueChange = onGainChanged,
+                valueRange = MainViewModel.GAIN_DB_MIN..MainViewModel.GAIN_DB_MAX,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        "LISTEN LIVE",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "Headphones/BT -- plays out loud if none connected",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+                Switch(checked = monitoringEnabled, onCheckedChange = onMonitoringChanged)
+            }
         }
     }
 }
@@ -263,7 +325,9 @@ private fun RecordingSetupSection(
     device: com.audiopro.djmrec.usb.UsbAudioDeviceInfo?,
     onRescan: () -> Unit,
     channelOffset: Int,
-    onChannelOffsetSelected: (Int) -> Unit
+    onChannelOffsetSelected: (Int) -> Unit,
+    maxFileSizeMb: Int,
+    onMaxFileSizeSelected: (Int) -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -306,6 +370,17 @@ private fun RecordingSetupSection(
                     onSelect = onChannelOffsetSelected
                 )
             }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+            Text(
+                "MAX FILE SIZE",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            MaxFileSizeSelector(
+                selectedMb = maxFileSizeMb,
+                enabled = true,
+                onSelect = onMaxFileSizeSelected
+            )
         }
     }
 }
