@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,7 +38,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.audiopro.djmrec.audio.RecordingState
@@ -50,7 +50,11 @@ import com.audiopro.djmrec.ui.components.StereoVuMeter
 import com.audiopro.djmrec.ui.components.TransportControls
 import com.audiopro.djmrec.ui.theme.AccentGreen
 import com.audiopro.djmrec.ui.theme.AccentRed
+import com.audiopro.djmrec.ui.theme.NfReadout
 import java.util.Locale
+
+private val NfPanelShape = RoundedCornerShape(4.dp)
+private val NfBadgeShape = RoundedCornerShape(3.dp)
 
 @Composable
 fun RecorderScreen(viewModel: MainViewModel) {
@@ -118,7 +122,8 @@ fun RecorderScreen(viewModel: MainViewModel) {
             if (recordingState is RecordingState.Error) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = NfPanelShape,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
@@ -170,8 +175,8 @@ private fun SignalSection(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(24.dp),
-        tonalElevation = 2.dp
+        shape = NfPanelShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(
@@ -183,8 +188,7 @@ private fun SignalSection(
                     Text(
                         "LIVE INPUT",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
+                        color = MaterialTheme.colorScheme.primary
                     )
                     Text(
                         if (showWaveform) "Live waveform" else "Input monitoring",
@@ -264,14 +268,18 @@ private fun StatePill(state: RecordingState) {
         is RecordingState.Error -> "CHECK SETUP" to MaterialTheme.colorScheme.error
         is RecordingState.Idle -> "STANDBY" to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(50)) {
+    Surface(
+        color = color.copy(alpha = 0.08f),
+        shape = NfBadgeShape,
+        border = BorderStroke(1.dp, color)
+    ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Box(Modifier.size(6.dp).background(color, CircleShape))
-            Text(label, style = MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.Bold)
+            Text(label, style = MaterialTheme.typography.labelSmall, color = color)
         }
     }
 }
@@ -332,15 +340,15 @@ private fun RecordingSetupSection(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(24.dp)
+        shape = NfPanelShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Column {
                 Text(
                     "RECORDING SETUP",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                    color = MaterialTheme.colorScheme.primary
                 )
                 Text("File format", style = MaterialTheme.typography.titleMedium)
             }
@@ -403,11 +411,7 @@ private fun RecordingTimer(elapsedMillis: Long, active: Boolean, paused: Boolean
         )
         Text(
             formatElapsed(elapsedMillis),
-            style = MaterialTheme.typography.displaySmall.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium
-            ),
-            color = MaterialTheme.colorScheme.onSurface
+            style = NfReadout
         )
     }
 }

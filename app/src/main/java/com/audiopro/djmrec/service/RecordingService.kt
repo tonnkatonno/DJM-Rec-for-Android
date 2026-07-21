@@ -32,6 +32,8 @@ import com.audiopro.djmrec.audio.ChannelLevel
 import com.audiopro.djmrec.audio.RecordingFormat
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.audio.StereoLevels
+import com.audiopro.djmrec.integrations.drive.DriveUploadManager
+import com.audiopro.djmrec.integrations.soundcloud.SoundCloudUploadManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -640,6 +642,12 @@ class RecordingService : LifecycleService() {
                 arrayOf(mimeTypeFor(currentFormat)),
                 null
             )
+            if (DriveUploadManager.isAutoUploadEnabled(this)) {
+                DriveUploadManager.enqueueUpload(this, file)
+            }
+            if (SoundCloudUploadManager.isAutoUploadEnabled(this)) {
+                SoundCloudUploadManager.enqueueUpload(this, file)
+            }
         }
         currentOutputFile = null
         releaseWakeLock()

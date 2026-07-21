@@ -19,6 +19,14 @@ val appVersion = loadProperties("version.properties")
 val keystoreFile = rootProject.file("keystore.properties")
 val keystore = if (keystoreFile.exists()) loadProperties("keystore.properties") else null
 
+// OAuth client IDs/secrets (Drive, SoundCloud, ...). File is gitignored; see
+// secrets.properties.example for the expected keys. Missing file/keys just leave the
+// corresponding BuildConfig field blank -- integrations degrade to "not configured", not a
+// build failure, so the project still builds for anyone who hasn't set these up yet.
+val secretsFile = rootProject.file("secrets.properties")
+val secrets = if (secretsFile.exists()) loadProperties("secrets.properties") else Properties()
+fun secret(key: String): String = secrets.getProperty(key, "")
+
 android {
     namespace = "com.audiopro.djmrec"
     compileSdk = 34
@@ -57,6 +65,10 @@ android {
                 )
             }
         }
+
+        buildConfigField("String", "GOOGLE_DRIVE_CLIENT_ID", "\"${secret("GOOGLE_DRIVE_CLIENT_ID")}\"")
+        buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", "\"${secret("SOUNDCLOUD_CLIENT_ID")}\"")
+        buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", "\"${secret("SOUNDCLOUD_CLIENT_SECRET")}\"")
     }
 
     buildTypes {
@@ -118,6 +130,15 @@ android {
             // the shared C++ runtime and our own library need to ship.
             useLegacyPackaging = false
         }
+        // google-api-client pulls in google-auth-library, which duplicates a few META-INF
+        // housekeeping files (not code) across its jars -- harmless to drop one copy.
+        resources {
+            excludes += listOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/DEPENDENCIES",
+                "META-INF/*.kotlin_module"
+            )
+        }
     }
 }
 
@@ -141,4 +162,24 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    // Google Drive upload integration. AuthorizationClient (Identity.getAuthorizationClient) is
+    // the current, non-deprecated replacement for GoogleSignInClient.requestScopes -- see
+    // developer.android.com/identity/authorization. Drive API access itself (google-api-client /
+    // google-api-services-drive) is unaffected by that deprecation.
+    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.google.api-client:google-api-client-android:2.7.0") {
+        exclude(group = "org.apache.httpcomponents")
+    }
+    implementation("com.google.apis:google-api-services-drive:v3-rev20240914-2.0.0")
+    implementation("com.google.http-client:google-http-client-gson:1.44.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
+
+    // SoundCloud upload integration: OAuth 2.1 + PKCE via Custom Tabs, multipart upload via
+    // OkHttp (SoundCloud's confidential-client requirement means we also carry a client secret
+    // -- see the code comment on SoundCloudAuthManager -- so its tokens are stored encrypted,
+    // unlike Drive's UI-only connected-hint).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

@@ -1,4 +1,4 @@
-package com.audiopro.djmrec.ui.components
+﻿package com.audiopro.djmrec.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -45,7 +45,7 @@ fun FormatSelector(
                     role = Role.RadioButton,
                     onClick = { onSelect(format) }
                 ).weight(1f),
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(3.dp),
                 color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
                 else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                 border = BorderStroke(

@@ -1,4 +1,4 @@
-package com.audiopro.djmrec.ui.components
+﻿package com.audiopro.djmrec.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,7 +25,7 @@ fun RgbWaveform(bins: FloatArray, modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxWidth()
             .height(168.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(4.dp))
             .background(Color.Black)
     ) {
         val centerY = size.height / 2f

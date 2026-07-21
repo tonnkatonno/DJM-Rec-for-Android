@@ -1,4 +1,4 @@
-package com.audiopro.djmrec.ui.components
+﻿package com.audiopro.djmrec.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -40,7 +40,7 @@ fun DeviceStatusCard(
             .fillMaxWidth()
             .background(
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.48f),
-                RoundedCornerShape(16.dp)
+                RoundedCornerShape(4.dp)
             )
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically

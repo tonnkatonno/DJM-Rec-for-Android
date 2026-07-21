@@ -22,4 +22,9 @@
     <string name="notification_text_elapsed">Elapsed %1$s</string>
 
     <string name="usb_permission_action">com.audiopro.djmrec.USB_PERMISSION</string>
+
+    <string name="upload_notification_channel_name">Cloud upload</string>
+    <string name="upload_notification_channel_desc">Progress while uploading recordings to Google Drive or SoundCloud</string>
+    <string name="upload_notification_title">Uploading to Drive: %1$s</string>
+    <string name="upload_notification_title_idle">Cloud upload</string>
 </resources>

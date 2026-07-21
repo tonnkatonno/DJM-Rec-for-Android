@@ -45,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import com.audiopro.djmrec.ui.theme.BackgroundDark
 import com.audiopro.djmrec.ui.theme.SurfaceDark
 import com.audiopro.djmrec.ui.theme.TextPrimary
@@ -111,8 +113,17 @@ fun MainScreen(viewModel: MainViewModel) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "DJM REC",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary,
+                    style = androidx.compose.ui.text.TextStyle(
+                        fontFamily = com.audiopro.djmrec.ui.theme.NfDisplayFontFamily,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Black,
+                        fontSize = 22.sp,
+                        letterSpacing = 0.12.em,
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = com.audiopro.djmrec.ui.theme.AccentCyan.copy(alpha = 0.6f),
+                            blurRadius = 24f
+                        )
+                    ),
+                    color = com.audiopro.djmrec.ui.theme.AccentCyan,
                     modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp)
                 )
                 Text(

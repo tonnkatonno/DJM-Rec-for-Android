@@ -1,4 +1,4 @@
-package com.audiopro.djmrec.ui
+﻿package com.audiopro.djmrec.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -51,7 +51,7 @@ fun DiagnosticsScreen() {
         )
         Surface(
             color = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(4.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
