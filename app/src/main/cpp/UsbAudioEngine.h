@@ -69,6 +69,10 @@ public:
     void getLevels(float outLevels[4]) const;
     bool isClipping() const;
     int64_t getElapsedMillis() const;
+    /** Sample rate of the currently open capture stream, or 0 if none is open -- lets dependent
+     *  pipelines (e.g. the live-stream AAC encoder) configure themselves to the actual negotiated
+     *  rate instead of assuming a fixed value. */
+    int32_t getCurrentSampleRate() const { return mFormat.sampleRate; }
     int32_t getXRunCount() const;
     void getUsbIsoTransferStats(uint64_t outStats[7]) const;
     std::string getDiagnosticSummary();
@@ -94,6 +98,27 @@ public:
      */
     void setMonitoringEnabled(bool enabled);
     bool isMonitoringEnabled() const { return mMonitoringEnabled.load(std::memory_order_relaxed); }
+
+    /**
+     * Enables/disables a dedicated ring buffer feeding the live-stream (Icecast) encoder path,
+     * independent of recording-to-file and of monitoring -- same on/off shape as
+     * [setMonitoringEnabled], but with no output audio stream of its own: this only ever
+     * produces PCM for [pullStreamPcm16] to pull, nothing is played back or sent anywhere by
+     * this class itself. Takes effect immediately if a capture stream is already open, or on
+     * the next open*() call otherwise (mirrors monitoring's retry-on-open behavior).
+     */
+    void setStreamingEnabled(bool enabled);
+    bool isStreamingEnabled() const { return mStreamingEnabled.load(std::memory_order_relaxed); }
+
+    /**
+     * Consumer-side pull for the live-stream path: copies up to @p maxFrames interleaved
+     * stereo 16-bit PCM frames (downconverted from the internal I32 canonical format at write
+     * time) into @p outInterleavedS16Stereo. Returns the number of frames actually copied (0 if
+     * streaming is disabled, no capture stream is open yet, or the buffer is momentarily
+     * empty). Single-consumer like mRingBuffer's encoder thread -- safe to call from one
+     * dedicated thread/coroutine, not safe to call concurrently from more than one.
+     */
+    size_t pullStreamPcm16(int16_t* outInterleavedS16Stereo, size_t maxFrames);
 
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream, void* audioData, int32_t numFrames) override;
@@ -122,6 +147,16 @@ private:
     /** Feeds @p interleavedStereo (already gained) into the monitor ring buffer if monitoring
      *  is currently enabled. Non-blocking (try_lock) -- called from realtime capture threads. */
     void feedMonitor(const int32_t* interleavedStereo, size_t frameCount);
+
+    /** Feeds @p interleavedStereo (already gained) into the streaming ring buffer, downconverted
+     *  to I16 on the way in, if streaming is currently enabled. Non-blocking (try_lock) --
+     *  called from realtime capture threads, same as feedMonitor. */
+    void feedStream(const int32_t* interleavedStereo, size_t frameCount);
+
+    /** (Re)allocates mStreamRingBuffer once mFormat.sampleRate is finalized, if streaming was
+     *  enabled before any capture stream was open -- mirrors startMonitorStreamIfEnabled(). Must
+     *  be called while holding mControlMutex. */
+    void startStreamingRingBufferIfEnabled();
 
     /** (Re)opens mMonitorStream at mFormat.sampleRate if monitoring is enabled -- called once a
      *  capture stream's format is finalized (initial open, or after mFormat changes) so a
@@ -161,6 +196,10 @@ private:
     std::mutex mMonitorRingBufferMutex; // guards mMonitorRingBuffer only; never held across close()
     std::atomic<bool> mMonitoringEnabled{false};
     oboe::AudioFormat mMonitorOboeFormat = oboe::AudioFormat::I16;
+
+    std::unique_ptr<RingBuffer> mStreamRingBuffer;
+    std::mutex mStreamRingBufferMutex; // guards mStreamRingBuffer only; never held across close()
+    std::atomic<bool> mStreamingEnabled{false};
 
     AudioFormatInfo mFormat;
     oboe::AudioFormat mOboeFormat = oboe::AudioFormat::I32;

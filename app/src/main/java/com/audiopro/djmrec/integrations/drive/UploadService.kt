@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import com.audiopro.djmrec.MainActivity
 import com.audiopro.djmrec.R
+import com.audiopro.djmrec.library.RemoteLinkIndex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,13 +69,32 @@ class UploadService : Service() {
         if (workerRunning) return
         workerRunning = true
         scope.launch {
-            for (file in queue) {
-                processUpload(file)
-            }
-            workerRunning = false
-            withContext(Dispatchers.Main) {
-                ServiceCompat.stopForeground(this@UploadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
+            // Drain, then stop -- see SoundCloudUploadService.startWorkerIfNeeded for why this
+            // isn't a `for (file in queue)` loop (it never terminates on an unclosed channel).
+            while (true) {
+                val file = queue.tryReceive().getOrNull()
+                    ?: withContext(Dispatchers.Main) {
+                        // Last look on Main before stopping; null means we really are done.
+                        queue.tryReceive().getOrNull().also { next ->
+                            if (next == null) {
+                                workerRunning = false
+                                ServiceCompat.stopForeground(this@UploadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                                stopSelf()
+                            }
+                        }
+                    }
+                    ?: break
+                try {
+                    processUpload(file)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Unexpected failure uploading ${file.name}", e)
+                    DriveUploadManager.updateState(
+                        file.absolutePath,
+                        DriveUploadManager.UploadState(
+                            DriveUploadManager.Status.FAILED, error = e.message ?: "Upload failed"
+                        )
+                    )
+                }
             }
         }
     }
@@ -88,7 +108,7 @@ class UploadService : Service() {
         when (val outcome = DriveAuthManager.requestAccess(applicationContext)) {
             is DriveAuthManager.Outcome.Authorized -> {
                 try {
-                    DriveUploader.upload(
+                    val fileId = DriveUploader.upload(
                         applicationContext, outcome.accessToken, file, mimeTypeFor(file)
                     ) { progress ->
                         DriveUploadManager.updateState(
@@ -98,6 +118,7 @@ class UploadService : Service() {
                         updateNotification(file.name, progress)
                     }
                     DriveUploadManager.markUploaded(applicationContext, file)
+                    RemoteLinkIndex.recordDrive(applicationContext, file, fileId)
                     DriveUploadManager.updateState(
                         file.absolutePath, DriveUploadManager.UploadState(DriveUploadManager.Status.DONE, 1f)
                     )

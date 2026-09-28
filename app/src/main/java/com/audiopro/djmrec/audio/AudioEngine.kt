@@ -110,6 +110,9 @@ object AudioEngine {
 
     external fun getElapsedMillis(): Long
 
+    /** Sample rate of the currently open capture stream, or 0 if none is open. */
+    external fun getCurrentSampleRate(): Int
+
     /** Underrun/overrun counters on the ring buffer, useful for diagnosing dropped audio. */
     external fun getXRunCount(): Int
 
@@ -145,4 +148,21 @@ object AudioEngine {
      * at any time, including before a capture stream is open (takes effect once one opens).
      */
     external fun setMonitoringEnabled(enabled: Boolean)
+
+    /**
+     * Enables/disables a dedicated native ring buffer feeding the live-stream (Icecast) encoder
+     * path, independent of recording-to-file and monitoring. Takes effect immediately if a
+     * capture stream is already open, or on the next open*() call otherwise. Nothing is played
+     * back or sent anywhere by the native side itself -- it only ever produces PCM for
+     * [pullStreamPcm16] to pull.
+     */
+    external fun setStreamingEnabled(enabled: Boolean)
+
+    /**
+     * Consumer-side pull for the live-stream path: returns up to [maxFrames] interleaved stereo
+     * 16-bit PCM frames (downconverted from the capture format on the native side), or null if
+     * streaming is disabled, no capture stream is open, or the buffer is momentarily empty.
+     * Not safe to call concurrently from more than one thread/coroutine.
+     */
+    external fun pullStreamPcm16(maxFrames: Int): ShortArray?
 }

@@ -4,19 +4,26 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.audiopro.djmrec.BuildConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -41,25 +48,56 @@ object SoundCloudAuthManager {
     private const val TOKEN_URL = "https://secure.soundcloud.com/oauth/token"
     const val REDIRECT_URI = "djmrec://soundcloud-callback"
 
+    private const val TAG = "SoundCloudAuth"
     private const val PREFS_NAME = "soundcloud_tokens"
     private const val KEY_ACCESS_TOKEN = "access_token"
     private const val KEY_REFRESH_TOKEN = "refresh_token"
     private const val KEY_EXPIRES_AT = "expires_at"
 
-    private var pendingCodeVerifier: String? = null
-    private var pendingState: String? = null
+    // PKCE verifier + state survive process death: while the Custom Tab login is open the app is
+    // in the background, and aggressive OEMs (OnePlus/Oppo) often kill it -- with in-memory
+    // fields the redirect then arrived into a fresh process with no verifier and the login
+    // silently failed. Plain prefs are fine: both values are single-use and useless without
+    // the matching authorization code.
+    private const val PKCE_PREFS = "soundcloud_pkce"
+    private const val KEY_PKCE_VERIFIER = "verifier"
+    private const val KEY_PKCE_STATE = "state"
 
-    private val _pendingRedirect = MutableStateFlow<Uri?>(null)
-    /** Set by [onRedirectReceived] (called from MainActivity); UI collects this to know when a
-     *  Custom Tabs round trip has returned, then should call [handleRedirect] and [consumeRedirect]. */
-    val pendingRedirect: StateFlow<Uri?> = _pendingRedirect.asStateFlow()
+    /** Refresh tokens are single-use: two concurrent refreshes (upload + library scan) used to
+     *  burn the token and the loser's 400 then wiped the login. Serialize them. */
+    private val refreshMutex = Mutex()
 
-    fun onRedirectReceived(uri: Uri) {
-        _pendingRedirect.value = uri
+    enum class ConnectStatus { IDLE, EXCHANGING, CONNECTED, FAILED }
+
+    private val _connectStatus = MutableStateFlow(ConnectStatus.IDLE)
+    /** Outcome of the last Custom Tabs round trip. Completed here, process-wide, rather than in
+     *  a screen's LaunchedEffect: after the OS killed the app during login the redirect lands in
+     *  a fresh process whose UI may not be showing Settings, and the code was never exchanged. */
+    val connectStatus: StateFlow<ConnectStatus> = _connectStatus.asStateFlow()
+
+    private val _connected = MutableStateFlow<Boolean?>(null)
+    /** Observable "has a refresh token" -- flips on connect, disconnect and store resets.
+     *  Null until first read via [connectedFlow]. */
+    fun connectedFlow(context: Context): StateFlow<Boolean?> {
+        if (_connected.value == null) _connected.value = isConnected(context)
+        return _connected.asStateFlow()
     }
 
-    fun consumeRedirect() {
-        _pendingRedirect.value = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    fun onRedirectReceived(context: Context, uri: Uri) {
+        val app = context.applicationContext
+        _connectStatus.value = ConnectStatus.EXCHANGING
+        scope.launch {
+            val ok = try {
+                handleRedirect(app, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "SoundCloud token exchange crashed", e)
+                false
+            }
+            _connectStatus.value = if (ok) ConnectStatus.CONNECTED else ConnectStatus.FAILED
+            _connected.value = isConnected(app)
+        }
     }
 
     /** Launches the SoundCloud login/consent page in a Custom Tab. */
@@ -67,8 +105,10 @@ object SoundCloudAuthManager {
         val codeVerifier = randomUrlSafeString()
         val codeChallenge = sha256UrlSafe(codeVerifier)
         val state = randomUrlSafeString()
-        pendingCodeVerifier = codeVerifier
-        pendingState = state
+        context.applicationContext.getSharedPreferences(PKCE_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_PKCE_VERIFIER, codeVerifier)
+            .putString(KEY_PKCE_STATE, state)
+            .commit()
 
         val uri = Uri.parse(AUTH_URL).buildUpon()
             .appendQueryParameter("client_id", BuildConfig.SOUNDCLOUD_CLIENT_ID)
@@ -87,10 +127,10 @@ object SoundCloudAuthManager {
     suspend fun handleRedirect(context: Context, uri: Uri): Boolean {
         val code = uri.getQueryParameter("code")
         val returnedState = uri.getQueryParameter("state")
-        val verifier = pendingCodeVerifier
-        pendingCodeVerifier = null
-        val expectedState = pendingState
-        pendingState = null
+        val pkce = context.applicationContext.getSharedPreferences(PKCE_PREFS, Context.MODE_PRIVATE)
+        val verifier = pkce.getString(KEY_PKCE_VERIFIER, null)
+        val expectedState = pkce.getString(KEY_PKCE_STATE, null)
+        pkce.edit().clear().apply()
 
         if (code == null || verifier == null || returnedState == null || returnedState != expectedState) {
             return false
@@ -99,24 +139,29 @@ object SoundCloudAuthManager {
     }
 
     fun isConnected(context: Context): Boolean =
-        prefs(context).contains(KEY_REFRESH_TOKEN)
+        guarded(context, false) { it.contains(KEY_REFRESH_TOKEN) }
 
     fun disconnect(context: Context) {
-        prefs(context).edit().clear().apply()
+        guarded(context, Unit) { it.edit().clear().commit() }
+        _connected.value = false
     }
 
     /** Returns a currently-valid access token, refreshing first if the cached one is expired
      *  (or close to it). Returns null if never connected, or if the refresh itself fails
      *  (revoked/expired refresh token) -- callers should treat null as "not connected". */
     suspend fun getValidAccessToken(context: Context): String? = withContext(Dispatchers.IO) {
-        val p = prefs(context)
-        val expiresAt = p.getLong(KEY_EXPIRES_AT, 0L)
-        val accessToken = p.getString(KEY_ACCESS_TOKEN, null)
-        if (accessToken != null && System.currentTimeMillis() < expiresAt - 60_000L) {
-            return@withContext accessToken
+        refreshMutex.withLock {
+            // Read inside the lock: a refresh that just finished in another coroutine already
+            // stored a fresh access token + the *new* refresh token.
+            val (accessToken, expiresAt, refreshToken) = guarded(context, Triple<String?, Long, String?>(null, 0L, null)) { p ->
+                Triple(p.getString(KEY_ACCESS_TOKEN, null), p.getLong(KEY_EXPIRES_AT, 0L), p.getString(KEY_REFRESH_TOKEN, null))
+            }
+            if (accessToken != null && System.currentTimeMillis() < expiresAt - 60_000L) {
+                return@withLock accessToken
+            }
+            refreshToken ?: return@withLock null
+            refreshAccessToken(context, refreshToken)
         }
-        val refreshToken = p.getString(KEY_REFRESH_TOKEN, null) ?: return@withContext null
-        refreshAccessToken(context, refreshToken)
     }
 
     private suspend fun exchangeCodeForTokens(context: Context, code: String, verifier: String): Boolean =
@@ -142,7 +187,7 @@ object SoundCloudAuthManager {
                 .add("client_secret", BuildConfig.SOUNDCLOUD_CLIENT_SECRET)
                 .add("refresh_token", refreshToken)
                 .build()
-            if (postForTokens(context, body)) prefs(context).getString(KEY_ACCESS_TOKEN, null) else null
+            if (postForTokens(context, body)) guarded(context, null) { it.getString(KEY_ACCESS_TOKEN, null) } else null
         }
 
     private fun postForTokens(context: Context, body: FormBody): Boolean {
@@ -154,34 +199,110 @@ object SoundCloudAuthManager {
                     return false
                 }
                 val json = JSONObject(response.body?.string().orEmpty())
-                val editor = prefs(context).edit()
-                    .putString(KEY_ACCESS_TOKEN, json.getString("access_token"))
-                    .putLong(
-                        KEY_EXPIRES_AT,
-                        System.currentTimeMillis() + json.optInt("expires_in", 3600) * 1000L
-                    )
-                val newRefreshToken = json.optString("refresh_token", "")
-                if (newRefreshToken.isNotEmpty()) editor.putString(KEY_REFRESH_TOKEN, newRefreshToken)
-                editor.apply()
-                true
+                val saved = guarded(context, false) { p ->
+                    val editor = p.edit()
+                        .putString(KEY_ACCESS_TOKEN, json.getString("access_token"))
+                        .putLong(
+                            KEY_EXPIRES_AT,
+                            System.currentTimeMillis() + json.optInt("expires_in", 3600) * 1000L
+                        )
+                    val newRefreshToken = json.optString("refresh_token", "")
+                    if (newRefreshToken.isNotEmpty()) editor.putString(KEY_REFRESH_TOKEN, newRefreshToken)
+                    // commit, not apply: a refresh token is single-use, losing it = forced re-login
+                    editor.commit()
+                }
+                if (saved) _needsReconnect.value = false
+                saved
             }
         } catch (e: Exception) {
             false
         }
     }
 
+    private val _needsReconnect = MutableStateFlow(false)
+    /** True once a corrupted token store had to be wiped -- Settings shows "reconnect" instead
+     *  of the upload silently failing. Cleared by the next successful token exchange. */
+    val needsReconnect: StateFlow<Boolean> = _needsReconnect.asStateFlow()
+
+    @Volatile private var cachedPrefs: SharedPreferences? = null
+
+    /**
+     * The Keystore master key and the Tink keyset stored inside the prefs file can drift apart
+     * (reinstall with `-k`, OEM "app clone"/restore, clearing only one of the two, a Keystore
+     * reset on OS update) -- every decrypt then throws BadPaddingException/KeyStoreException
+     * (BAD_DECRYPT). That used to crash the app from both the upload service and the UI.
+     * Instead: probe the store once, and on any crypto failure throw the whole store *and* the
+     * master key away and start clean; the user just has to reconnect SoundCloud.
+     */
     private fun prefs(context: Context): SharedPreferences {
-        val masterKey = MasterKey.Builder(context.applicationContext)
+        cachedPrefs?.let { return it }
+        synchronized(this) {
+            cachedPrefs?.let { return it }
+            val app = context.applicationContext
+            val created = try {
+                openEncryptedPrefs(app).also { it.all } // .all forces every entry to decrypt
+            } catch (e: Exception) {
+                Log.w(TAG, "SoundCloud token store unreadable, resetting it", e)
+                resetEncryptedStore(app)
+                _needsReconnect.value = true
+                try {
+                    openEncryptedPrefs(app)
+                } catch (e2: Exception) {
+                    // Keystore itself unusable -- degrade to "not connected" rather than crash.
+                    Log.e(TAG, "SoundCloud token store still unusable after reset", e2)
+                    app.getSharedPreferences("${PREFS_NAME}_fallback_empty", Context.MODE_PRIVATE)
+                        .also { it.edit().clear().apply() }
+                }
+            }
+            cachedPrefs = created
+            return created
+        }
+    }
+
+    private fun openEncryptedPrefs(app: Context): SharedPreferences {
+        val masterKey = MasterKey.Builder(app)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
         return EncryptedSharedPreferences.create(
-            context.applicationContext,
+            app,
             PREFS_NAME,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     }
+
+    private fun resetEncryptedStore(app: Context) {
+        try {
+            app.deleteSharedPreferences(PREFS_NAME)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not delete $PREFS_NAME", e)
+        }
+        try {
+            KeyStore.getInstance("AndroidKeyStore").apply {
+                load(null)
+                if (containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not delete master key", e)
+        }
+    }
+
+    /** Any read/write of an already-open store can still hit a Keystore failure mid-session --
+     *  treat it the same as a corrupt store on open. */
+    private inline fun <T> guarded(context: Context, fallback: T, block: (SharedPreferences) -> T): T =
+        try {
+            block(prefs(context))
+        } catch (e: Exception) {
+            Log.w(TAG, "SoundCloud token store failed mid-use, resetting it", e)
+            synchronized(this) {
+                cachedPrefs = null
+                resetEncryptedStore(context.applicationContext)
+            }
+            _needsReconnect.value = true
+            _connected.value = false
+            fallback
+        }
 
     private fun randomUrlSafeString(): String {
         val bytes = ByteArray(32)

@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "../UsbAudioEngine.h"
 
@@ -135,6 +136,11 @@ Java_com_audiopro_djmrec_audio_AudioEngine_getXRunCount(JNIEnv* /*env*/, jobject
     return UsbAudioEngine::instance().getXRunCount();
 }
 
+JNIEXPORT jint JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_getCurrentSampleRate(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().getCurrentSampleRate();
+}
+
 JNIEXPORT jlongArray JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_getUsbIsoTransferStats(JNIEnv* env, jobject /*thiz*/) {
     uint64_t stats[7]{};
@@ -181,5 +187,24 @@ JNIEXPORT void JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_setMonitoringEnabled(
     JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
     UsbAudioEngine::instance().setMonitoringEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setStreamingEnabled(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    UsbAudioEngine::instance().setStreamingEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jshortArray JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_pullStreamPcm16(
+    JNIEnv* env, jobject /*thiz*/, jint maxFrames) {
+    std::vector<int16_t> buffer(static_cast<size_t>(maxFrames) * 2);
+    const size_t framesRead =
+        UsbAudioEngine::instance().pullStreamPcm16(buffer.data(), static_cast<size_t>(maxFrames));
+    if (framesRead == 0) return nullptr;
+    const auto sampleCount = static_cast<jsize>(framesRead * 2);
+    jshortArray result = env->NewShortArray(sampleCount);
+    env->SetShortArrayRegion(result, 0, sampleCount, buffer.data());
+    return result;
 }
 } // extern "C"

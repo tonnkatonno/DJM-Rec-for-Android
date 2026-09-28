@@ -134,6 +134,7 @@ int UsbAudioEngine::open(int32_t audioManagerDeviceId, int32_t sampleRateHint, i
 
     mStreamOpen.store(true, std::memory_order_release);
     startMonitorStreamIfEnabled();
+    startStreamingRingBufferIfEnabled();
     LOGI("AAudio input open: %d Hz, %d ch, actual format=%d, sharing=%s, perf=%s",
          mFormat.sampleRate, mFormat.channelCount, static_cast<int>(mOboeFormat),
          oboe::convertToText(mStream->getSharingMode()), oboe::convertToText(mStream->getPerformanceMode()));
@@ -198,6 +199,7 @@ int UsbAudioEngine::openUsbIso(const UsbIsoAudioSource::Config& isoConfig, int32
 
     mStreamOpen.store(true, std::memory_order_release);
     startMonitorStreamIfEnabled();
+    startStreamingRingBufferIfEnabled();
     LOGI("USB iso capture open: %d Hz, 2ch extracted from a %dch wire "
          "format, format=I32 canonical",
             mFormat.sampleRate, isoConfig.totalChannels);
@@ -247,6 +249,7 @@ int UsbAudioEngine::openRootAlsa(const AlsaPcmAudioSource::Config& alsaConfig) {
     mWaveformAnalyzer = std::make_unique<WaveformAnalyzer>(mFormat.sampleRate);
     mStreamOpen.store(true, std::memory_order_release);
     startMonitorStreamIfEnabled();
+    startStreamingRingBufferIfEnabled();
 
     LOGI("Root ALSA capture open: hw:%d,%d @ %dHz, %dbit, native channels=%d, output stereo I32",
          alsaConfig.card, alsaConfig.device, mFormat.sampleRate, mFormat.bitsPerSample,
@@ -282,6 +285,7 @@ void UsbAudioEngine::onUsbIsoFrames(const int32_t* sourceInterleavedStereo, size
     }
 
     feedMonitor(interleavedStereo, frameCount);
+    feedStream(interleavedStereo, frameCount);
 
     if (mRecording.load(std::memory_order_relaxed) &&
         !mPaused.load(std::memory_order_relaxed) &&
@@ -367,6 +371,7 @@ oboe::DataCallbackResult UsbAudioEngine::onAudioReady(oboe::AudioStream* stream,
     // only one that could in principle negotiate a different channel count.
     if (mChannelCount == 2) {
         feedMonitor(canonical.data(), static_cast<size_t>(numFrames));
+        feedStream(canonical.data(), static_cast<size_t>(numFrames));
     }
 
     mAaudioLeftPeakSinceLog = std::max(mAaudioLeftPeakSinceLog, reading.leftPeakDb);
@@ -502,6 +507,10 @@ void UsbAudioEngine::closeEngine() {
     // mWaveformEnabled -- only the stream itself is torn down, so it comes back automatically
     // on the next open*() call via startMonitorStreamIfEnabled().
     stopMonitorStream();
+    {
+        std::lock_guard<std::mutex> bufLock(mStreamRingBufferMutex);
+        mStreamRingBuffer.reset(); // preference (mStreamingEnabled) survives, same as monitoring/waveform
+    }
     mRingBuffer.reset();
     mSourceMode = SourceMode::None;
     mStreamOpen.store(false, std::memory_order_release);
@@ -664,6 +673,55 @@ void UsbAudioEngine::feedMonitor(const int32_t* interleavedStereo, size_t frameC
     // No xrun counting here -- a dropped monitor frame is a minor, self-correcting UX detail
     // (the next callback just catches up), unlike the recording ring buffer where a drop is
     // permanently lost audio.
+}
+
+void UsbAudioEngine::setStreamingEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mControlMutex);
+    if (enabled == mStreamingEnabled.load(std::memory_order_relaxed)) return;
+    if (!enabled) {
+        mStreamingEnabled.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> bufLock(mStreamRingBufferMutex);
+        mStreamRingBuffer.reset();
+        return;
+    }
+    mStreamingEnabled.store(true, std::memory_order_release);
+    startStreamingRingBufferIfEnabled(); // no-op if no capture stream is open yet; retried on next open*()
+}
+
+void UsbAudioEngine::startStreamingRingBufferIfEnabled() {
+    // Caller must already hold mControlMutex.
+    if (!mStreamingEnabled.load(std::memory_order_relaxed)) return;
+    if (mFormat.sampleRate <= 0) return; // no capture format finalized yet; retried on open*()
+    std::lock_guard<std::mutex> bufLock(mStreamRingBufferMutex);
+    if (mStreamRingBuffer) return; // already allocated -- idempotent
+    // 1s of headroom: the consumer here is a Kotlin coroutine polling on its own schedule
+    // (not a hardware callback like the monitor output stream), so it tolerates more jitter.
+    const size_t frames = static_cast<size_t>(mFormat.sampleRate) * 1;
+    mStreamRingBuffer = std::make_unique<RingBuffer>(frames * 2 * sizeof(int16_t));
+}
+
+void UsbAudioEngine::feedStream(const int32_t* interleavedStereo, size_t frameCount) {
+    if (!mStreamingEnabled.load(std::memory_order_relaxed)) return;
+    std::unique_lock<std::mutex> lock(mStreamRingBufferMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !mStreamRingBuffer) return; // toggling right now, or not open yet
+    const size_t sampleCount = frameCount * 2;
+    static thread_local std::vector<int16_t> pcm16;
+    if (pcm16.size() < sampleCount) pcm16.resize(sampleCount);
+    for (size_t i = 0; i < sampleCount; ++i) {
+        pcm16[i] = static_cast<int16_t>(interleavedStereo[i] >> 16);
+    }
+    mStreamRingBuffer->write(reinterpret_cast<const uint8_t*>(pcm16.data()), sampleCount * sizeof(int16_t));
+    // No xrun counting here -- same rationale as feedMonitor: a dropped streaming frame just
+    // means a brief encoder underrun, not permanently lost recorded audio.
+}
+
+size_t UsbAudioEngine::pullStreamPcm16(int16_t* outInterleavedS16Stereo, size_t maxFrames) {
+    std::unique_lock<std::mutex> lock(mStreamRingBufferMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !mStreamRingBuffer) return 0;
+    const size_t maxBytes = maxFrames * 2 * sizeof(int16_t);
+    const size_t bytesRead =
+        mStreamRingBuffer->read(reinterpret_cast<uint8_t*>(outInterleavedS16Stereo), maxBytes);
+    return bytesRead / (2 * sizeof(int16_t));
 }
 
 void UsbAudioEngine::startMonitorStreamIfEnabled() {

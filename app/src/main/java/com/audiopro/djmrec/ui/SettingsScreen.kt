@@ -97,26 +97,20 @@ fun SettingsScreen(viewModel: MainViewModel) {
         }
     }
 
-    var scConnected by remember { mutableStateOf(SoundCloudAuthManager.isConnected(context)) }
+    val scConnectedState by SoundCloudAuthManager.connectedFlow(context).collectAsState()
+    val scConnected = scConnectedState == true
+    val scNeedsReconnect by SoundCloudAuthManager.needsReconnect.collectAsState()
     var scAutoUpload by remember { mutableStateOf(SoundCloudUploadManager.isAutoUploadEnabled(context)) }
-    var scConnecting by remember { mutableStateOf(false) }
-    var scError by remember { mutableStateOf<String?>(null) }
-    var showSoundCloudDefaults by remember { mutableStateOf(false) }
-
-    val scPendingRedirect by SoundCloudAuthManager.pendingRedirect.collectAsState()
-    LaunchedEffect(scPendingRedirect) {
-        val uri = scPendingRedirect ?: return@LaunchedEffect
-        scConnecting = true
-        val success = SoundCloudAuthManager.handleRedirect(context, uri)
-        SoundCloudAuthManager.consumeRedirect()
-        scConnecting = false
-        if (success) {
-            scConnected = true
-            scError = null
-        } else {
-            scError = "SoundCloud connection was not completed"
-        }
+    val scConnectStatus by SoundCloudAuthManager.connectStatus.collectAsState()
+    // Only the token exchange itself blocks the button -- a login tab the user just closed
+    // must never leave CONNECT stuck disabled.
+    val scConnecting = scConnectStatus == SoundCloudAuthManager.ConnectStatus.EXCHANGING
+    val scError = if (scConnectStatus == SoundCloudAuthManager.ConnectStatus.FAILED && !scConnected) {
+        "SoundCloud login was not completed -- tap CONNECT to try again"
+    } else {
+        null
     }
+    var showSoundCloudDefaults by remember { mutableStateOf(false) }
 
     if (showSoundCloudDefaults) {
         SoundCloudDefaultsScreen(onBack = { showSoundCloudDefaults = false })
@@ -241,13 +235,18 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("SoundCloud", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            if (scConnected) "Connected" else "Not connected",
+                            when {
+                                scConnecting -> "Connecting…"
+                                scConnected -> "Connected"
+                                scNeedsReconnect -> "Login expired -- tap CONNECT"
+                                else -> "Not connected"
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     OutlinedButton(
-                        onClick = { scConnecting = true; SoundCloudAuthManager.launchAuthorization(context) },
+                        onClick = { SoundCloudAuthManager.launchAuthorization(context) },
                         enabled = !scConnecting,
                         shape = RoundedCornerShape(3.dp),
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)

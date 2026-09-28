@@ -3,16 +3,21 @@ package com.audiopro.djmrec.integrations.soundcloud
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.getSystemService
 import com.audiopro.djmrec.MainActivity
 import com.audiopro.djmrec.R
+import com.audiopro.djmrec.library.RemoteLinkIndex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -67,13 +72,34 @@ class SoundCloudUploadService : Service() {
         if (workerRunning) return
         workerRunning = true
         scope.launch {
-            for (file in queue) {
-                processUpload(file)
-            }
-            workerRunning = false
-            withContext(Dispatchers.Main) {
-                ServiceCompat.stopForeground(this@SoundCloudUploadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
+            // Drain, then stop. (A plain `for (file in queue)` never ends -- the channel is never
+            // closed -- so the service and its ongoing notification used to live forever.) The
+            // empty-check + stop runs on Main, same thread as onStartCommand, so a file enqueued
+            // right as the queue drains can't be stranded.
+            while (true) {
+                val file = queue.tryReceive().getOrNull()
+                    ?: withContext(Dispatchers.Main) {
+                        // Last look on Main before stopping; null means we really are done.
+                        queue.tryReceive().getOrNull().also { next ->
+                            if (next == null) {
+                                workerRunning = false
+                                ServiceCompat.stopForeground(this@SoundCloudUploadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                                stopSelf()
+                            }
+                        }
+                    }
+                    ?: break
+                try {
+                    processUpload(file)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Unexpected failure uploading ${file.name}", e)
+                    SoundCloudUploadManager.updateState(
+                        file.absolutePath,
+                        SoundCloudUploadManager.UploadState(
+                            SoundCloudUploadManager.Status.FAILED, error = e.message ?: "Upload failed"
+                        )
+                    )
+                }
             }
         }
     }
@@ -89,7 +115,11 @@ class SoundCloudUploadService : Service() {
                 file.absolutePath,
                 SoundCloudUploadManager.UploadState(
                     SoundCloudUploadManager.Status.FAILED,
-                    error = "Connect SoundCloud in Settings first"
+                    error = if (SoundCloudAuthManager.needsReconnect.value) {
+                        "SoundCloud login expired -- reconnect in Settings"
+                    } else {
+                        "Connect SoundCloud in Settings first"
+                    }
                 )
             )
             return
@@ -100,7 +130,7 @@ class SoundCloudUploadService : Service() {
                 applicationContext, file, title = file.nameWithoutExtension, private = true,
                 genre = SoundCloudUploadManager.getDefaultGenre(applicationContext),
                 tags = SoundCloudUploadManager.getDefaultTags(applicationContext),
-                description = SoundCloudUploadManager.getDefaultDescription(applicationContext)
+                description = buildDescription(file)
             ) { progress ->
                 SoundCloudUploadManager.updateState(
                     file.absolutePath,
@@ -109,10 +139,12 @@ class SoundCloudUploadService : Service() {
                 updateNotification(file.name, progress)
             }
             SoundCloudUploadManager.markUploaded(applicationContext, file)
+            RemoteLinkIndex.recordSoundCloud(applicationContext, file, trackUrl)
             SoundCloudUploadManager.updateState(
                 file.absolutePath,
                 SoundCloudUploadManager.UploadState(SoundCloudUploadManager.Status.DONE, 1f, trackUrl = trackUrl)
             )
+            copyLinkToClipboardAndNotify(trackUrl)
         } catch (e: Exception) {
             Log.w(TAG, "Upload failed for ${file.name}", e)
             SoundCloudUploadManager.updateState(
@@ -122,6 +154,28 @@ class SoundCloudUploadService : Service() {
                 )
             )
         }
+    }
+
+    /** Prepends the recording's tracklist sidecar (written by RecordingService when "MARK" was
+     *  used during the take), if one exists next to the audio file, to the default description. */
+    private fun buildDescription(file: File): String {
+        val baseDescription = SoundCloudUploadManager.getDefaultDescription(applicationContext)
+        val sidecar = File(file.parentFile, "${file.nameWithoutExtension}.tracklist.txt")
+        if (!sidecar.isFile) return baseDescription
+        val tracklist = try {
+            sidecar.readText()
+        } catch (e: Exception) {
+            return baseDescription
+        }
+        return "Tracklist:\n$tracklist\n\n$baseDescription"
+    }
+
+    /** The whole point of uploading as a private track is that it's instantly shareable --
+     *  copy the link immediately so the next action is just pasting it somewhere. */
+    private suspend fun copyLinkToClipboardAndNotify(trackUrl: String) = withContext(Dispatchers.Main) {
+        val clipboard = getSystemService<ClipboardManager>()
+        clipboard?.setPrimaryClip(ClipData.newPlainText("SoundCloud link", trackUrl))
+        Toast.makeText(applicationContext, "SoundCloud link copied to clipboard", Toast.LENGTH_LONG).show()
     }
 
     private fun startForegroundSafely() {

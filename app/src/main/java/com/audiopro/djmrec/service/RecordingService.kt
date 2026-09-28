@@ -30,6 +30,7 @@ import com.audiopro.djmrec.R
 import com.audiopro.djmrec.audio.AudioEngine
 import com.audiopro.djmrec.audio.ChannelLevel
 import com.audiopro.djmrec.audio.RecordingFormat
+import com.audiopro.djmrec.audio.RecordingHealth
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.audio.StereoLevels
 import com.audiopro.djmrec.integrations.drive.DriveUploadManager
@@ -99,6 +100,13 @@ class RecordingService : LifecycleService() {
         private const val NOTIFICATION_UPDATE_INTERVAL_MS = 500L
         private const val USB_SIGNAL_CHECK_INTERVAL_MS = 100L
         private const val USB_SIGNAL_CHECK_TIMEOUT_MS = 1500L
+        private const val LOW_STORAGE_THRESHOLD_BYTES = 500L * 1024 * 1024 // 500 MB
+        private const val STORAGE_CHECK_EVERY_N_NOTIFICATION_TICKS = 10 // ~5s at 500ms/tick
+        private const val ALERT_CHANNEL_ID = "recording_alerts"
+        private const val ALERT_NOTIFICATION_ID = 1010
+        /** Android 16 "Live Update" opt-in (Notification.EXTRA_REQUEST_PROMOTED_ONGOING); spelled
+         *  out because compileSdk 34 predates the constant. Ignored by older Android versions. */
+        private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
     }
 
     inner class LocalBinder : android.os.Binder() {
@@ -146,6 +154,18 @@ class RecordingService : LifecycleService() {
     @Volatile
     private var maxFileSizeBytes: Long = 0L
 
+    /** Elapsed-millis timestamps of each "mark" tap during the current take; cleared on every
+     *  new recording. Written out as a sidecar tracklist file on finalize (see [stopSession]). */
+    private val trackMarks = mutableListOf<Long>()
+    private val _trackMarkCount = MutableStateFlow(0)
+    val trackMarkCount: StateFlow<Int> = _trackMarkCount.asStateFlow()
+
+    /** Non-blocking -- recording is never auto-stopped for this, just surfaced so a multi-GB
+     *  take doesn't silently run the device out of space mid-set. */
+    private val _lowStorageWarning = MutableStateFlow(false)
+    val lowStorageWarning: StateFlow<Boolean> = _lowStorageWarning.asStateFlow()
+    private var storageCheckTick = 0
+
     private val meterRunnable = object : Runnable {
         override fun run() {
             if (_state.value is RecordingState.Recording || _state.value is RecordingState.Paused ||
@@ -172,10 +192,101 @@ class RecordingService : LifecycleService() {
         override fun run() {
             if (_state.value is RecordingState.Recording || _state.value is RecordingState.Paused ||
                 _state.value is RecordingState.Monitoring) {
+                updateHealth()
                 updateNotification()
+                if (_state.value is RecordingState.Recording &&
+                    storageCheckTick++ % STORAGE_CHECK_EVERY_N_NOTIFICATION_TICKS == 0) {
+                    checkLowStorage()
+                }
                 monitorHandler.postDelayed(this, NOTIFICATION_UPDATE_INTERVAL_MS)
             }
         }
+    }
+
+    private val _health = MutableStateFlow(RecordingHealth())
+    val health: StateFlow<RecordingHealth> = _health.asStateFlow()
+    private var lastFileBytes = -1L
+    private var lastGrowthAtMs = 0L
+    private var lastSignalAtMs = 0L
+    /** Wall-clock start for the notification chronometer (now - elapsed), re-based only when it
+     *  drifts, so the lock-screen timer ticks smoothly on its own between our updates. */
+    private var chronometerBaseMs = 0L
+    private var alertPosted = false
+
+    /** Runs on the monitor thread every notification tick (500 ms). */
+    private fun updateHealth() {
+        val now = SystemClock.elapsedRealtime()
+        val state = _state.value
+        val file = currentOutputFile
+        if (file == null || (state !is RecordingState.Recording && state !is RecordingState.Paused)) {
+            _health.value = RecordingHealth()
+            clearHealthAlert()
+            return
+        }
+        val bytes = file.length()
+        if (bytes != lastFileBytes || state is RecordingState.Paused || lastGrowthAtMs == 0L) {
+            // Paused legitimately doesn't grow -- keep the stall clock from running meanwhile.
+            lastGrowthAtMs = now
+        }
+        lastFileBytes = bytes
+        val levels = _levels.value
+        if (maxOf(levels.left.peakDb, levels.right.peakDb) > RecordingHealth.SIGNAL_FLOOR_DB ||
+            state is RecordingState.Paused || lastSignalAtMs == 0L) {
+            lastSignalAtMs = now
+        }
+        val health = RecordingHealth(
+            fileName = file.name,
+            format = currentFormat,
+            fileBytes = bytes,
+            stalled = now - lastGrowthAtMs > RecordingHealth.STALL_AFTER_MS,
+            noSignal = now - lastSignalAtMs > RecordingHealth.NO_SIGNAL_AFTER_MS,
+            xruns = try { AudioEngine.getXRunCount() } catch (_: Throwable) { 0 }
+        )
+        _health.value = health
+        if (health.ok) clearHealthAlert() else postHealthAlert(health)
+    }
+
+    private fun resetHealth() {
+        lastFileBytes = -1L
+        lastGrowthAtMs = 0L
+        lastSignalAtMs = 0L
+        chronometerBaseMs = 0L
+        _health.value = RecordingHealth()
+        clearHealthAlert()
+    }
+
+    /** Separate high-importance notification, posted once per incident, so a stuck writer or a
+     *  dead input buzzes the phone in the DJ's pocket instead of being discovered after the set. */
+    private fun postHealthAlert(health: RecordingHealth) {
+        if (alertPosted || !canPostNotifications()) return
+        alertPosted = true
+        val text = when {
+            health.stalled -> "The recording file stopped growing. Open DJM-Rec and check the mixer connection."
+            else -> "No input signal for ${RecordingHealth.NO_SIGNAL_AFTER_MS / 1000}s. Is the mixer channel/fader up?"
+        }
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(if (health.stalled) "⚠ Recording stalled" else "⚠ No input signal")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(mainActivityPendingIntent())
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(this).notify(ALERT_NOTIFICATION_ID, notification)
+    }
+
+    private fun clearHealthAlert() {
+        if (!alertPosted) return
+        alertPosted = false
+        NotificationManagerCompat.from(this).cancel(ALERT_NOTIFICATION_ID)
+    }
+
+    private fun checkLowStorage() {
+        val outputDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+        _lowStorageWarning.value = outputDir.usableSpace < LOW_STORAGE_THRESHOLD_BYTES
     }
 
     override fun onCreate() {
@@ -208,6 +319,14 @@ class RecordingService : LifecycleService() {
     /** [mb] in megabytes; 0 or less means unlimited. */
     fun setMaxFileSizeMb(mb: Int) {
         maxFileSizeBytes = if (mb <= 0) 0L else mb.toLong() * 1024L * 1024L
+    }
+
+    /** Timestamps a track change during the current take (e.g. mixed into the next tune). No-op
+     *  outside Recording -- there's nothing meaningful to timestamp against otherwise. */
+    fun markTrackChange() {
+        if (_state.value !is RecordingState.Recording) return
+        trackMarks.add(AudioEngine.getElapsedMillis())
+        _trackMarkCount.value = trackMarks.size
     }
 
     /** Auto-stops (finalizing the current file cleanly) once it crosses the configured limit --
@@ -366,7 +485,7 @@ class RecordingService : LifecycleService() {
 
     private fun recordingFormatFrom(intent: Intent): RecordingFormat {
         val value = intent.getIntExtra(EXTRA_FORMAT, currentFormat.nativeValue)
-        return RecordingFormat.entries.firstOrNull { it.nativeValue == value } ?: RecordingFormat.WAV
+        return RecordingFormat.entries.firstOrNull { it.nativeValue == value } ?: RecordingFormat.FLAC
     }
 
     fun startSession(
@@ -520,6 +639,11 @@ class RecordingService : LifecycleService() {
         val outputFile = File(outputDir, "mix_$timestamp.${format.extension}")
         currentOutputFile = outputFile
         currentFormat = format
+        trackMarks.clear()
+        _trackMarkCount.value = 0
+        storageCheckTick = 0
+        _lowStorageWarning.value = false
+        resetHealth()
 
         val started = AudioEngine.startRecording(outputFile.absolutePath, format.nativeValue)
         if (!started) {
@@ -642,6 +766,9 @@ class RecordingService : LifecycleService() {
                 arrayOf(mimeTypeFor(currentFormat)),
                 null
             )
+            if (trackMarks.isNotEmpty()) {
+                writeTracklistSidecar(file)
+            }
             if (DriveUploadManager.isAutoUploadEnabled(this)) {
                 DriveUploadManager.enqueueUpload(this, file)
             }
@@ -650,11 +777,26 @@ class RecordingService : LifecycleService() {
             }
         }
         currentOutputFile = null
+        resetHealth()
         releaseWakeLock()
         _state.value = RecordingState.Monitoring
         isMonitoringOnly = true
         _elapsedMillis.value = 0L
+        _lowStorageWarning.value = false
         updateNotification()
+    }
+
+    /** Plain-text "mm:ss  Track N" list next to the audio file (same basename, `.tracklist.txt`)
+     *  -- excluded from the library screen's wav/flac filter, and merged into the SoundCloud
+     *  description at upload time if present (see SoundCloudUploadService). */
+    private fun writeTracklistSidecar(audioFile: File) {
+        val sidecar = File(audioFile.parentFile, "${audioFile.nameWithoutExtension}.tracklist.txt")
+        val lines = trackMarks.mapIndexed { index, ms -> "${formatElapsed(ms)}  Track ${index + 1}" }
+        try {
+            sidecar.writeText(lines.joinToString("\n"))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to write tracklist sidecar for ${audioFile.name}", e)
+        }
     }
 
     private fun mimeTypeFor(format: RecordingFormat): String = when (format) {
@@ -704,6 +846,12 @@ class RecordingService : LifecycleService() {
             .setShowBadge(false)
             .build()
         NotificationManagerCompat.from(this).createNotificationChannel(channel)
+        val alerts = NotificationChannelCompat.Builder(ALERT_CHANNEL_ID, android.app.NotificationManager.IMPORTANCE_HIGH)
+            .setName(getString(R.string.alert_channel_name))
+            .setDescription(getString(R.string.alert_channel_desc))
+            .setVibrationEnabled(true)
+            .build()
+        NotificationManagerCompat.from(this).createNotificationChannel(alerts)
     }
 
     /**
@@ -739,24 +887,43 @@ class RecordingService : LifecycleService() {
         }
     }
 
-    private fun updateNotification() {
-        val canNotify = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
-        if (canNotify) {
+
+    private fun updateNotification() {
+        if (canPostNotifications()) {
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
         }
     }
 
-    private fun buildNotification(): Notification {
-        val isPaused = _state.value is RecordingState.Paused
-        val elapsed = formatElapsed(_elapsedMillis.value)
-        val hasSignal = _levels.value.left.peakDb > -50f || _levels.value.right.peakDb > -50f
+    private fun mainActivityPendingIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
 
-        val contentIntent = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+    /**
+     * Built to be read at a glance on the lock screen, mid-set:
+     *  - VISIBILITY_PUBLIC -- a secure lock screen otherwise shows only "Contents hidden".
+     *  - A system chronometer while recording, so the timer visibly ticks on its own even
+     *    between our 500 ms updates -- a frozen timer is the first sign something died.
+     *  - Title carries the verdict (● REC / ⚠ STALLED / ❚❚ PAUSED), body the evidence
+     *    (file size growing, format, signal, dropouts).
+     *  - On Android 16 it asks to be a promoted "Live Update" (status-bar chip + prominent
+     *    lock-screen card); older versions ignore the extra.
+     */
+    private fun buildNotification(): Notification {
+        val state = _state.value
+        val isPaused = state is RecordingState.Paused
+        val isRecording = state is RecordingState.Recording
+        val isMonitoringOnly = state is RecordingState.Monitoring
+        val elapsedMs = _elapsedMillis.value
+        val elapsed = formatElapsed(elapsedMs)
+        val health = _health.value
+        val hasSignal = maxOf(_levels.value.left.peakDb, _levels.value.right.peakDb) > RecordingHealth.SIGNAL_FLOOR_DB
+
+        val contentIntent = mainActivityPendingIntent()
 
         val toggleAction = if (isPaused) {
             NotificationCompat.Action(
@@ -774,25 +941,72 @@ class RecordingService : LifecycleService() {
             servicePendingIntent(ACTION_STOP)
         )
 
-        val title = if (isPaused) {
-            getString(R.string.notification_title_paused)
-        } else {
-            getString(R.string.notification_title_recording, deviceLabel)
+        val title = when {
+            isMonitoringOnly -> getString(R.string.notification_title_monitoring, deviceLabel)
+            isPaused -> getString(R.string.notification_title_paused_at, elapsed)
+            health.stalled -> getString(R.string.notification_title_stalled)
+            else -> getString(R.string.notification_title_rec, deviceLabel)
         }
-        val text = getString(R.string.notification_text_elapsed, elapsed) +
-            if (hasSignal && !isPaused) " • ●" else ""
+        val summary = if (isMonitoringOnly) {
+            getString(R.string.notification_text_monitoring)
+        } else {
+            listOfNotNull(
+                health.format?.name,
+                formatBytes(health.fileBytes),
+                when {
+                    isPaused -> null
+                    health.noSignal -> "⚠ NO SIGNAL"
+                    hasSignal -> "SIGNAL ●"
+                    else -> "quiet"
+                },
+                health.xruns.takeIf { it > 0 }?.let { "$it dropouts" }
+            ).joinToString("  ·  ")
+        }
+        val detail = when {
+            isMonitoringOnly -> summary
+            health.stalled -> "$summary\nFile is NOT growing -- open the app and check the mixer."
+            isPaused -> "$summary\nPaused -- nothing is being written."
+            else -> "$summary\n✓ Writing ${health.fileName ?: ""}"
+        }
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        // Stable chronometer base: only re-based when it drifts >1.5 s from the engine's clock
+        // (pause/resume), so the ticking lock-screen timer never jumps back and forth.
+        if (isRecording) {
+            val wanted = System.currentTimeMillis() - elapsedMs
+            if (chronometerBaseMs == 0L || kotlin.math.abs(chronometerBaseMs - wanted) > 1_500L) {
+                chronometerBaseMs = wanted
+            }
+        }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
-            .setContentText(text)
+            .setContentText(summary)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_STOPWATCH)
+            .setColor(if (health.stalled || health.noSignal) 0xFFFFAB00.toInt() else 0xFFFF3D00.toInt())
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .addAction(toggleAction)
             .addAction(stopAction)
-            .build()
+        if (isRecording) {
+            builder.setUsesChronometer(true).setShowWhen(true).setWhen(chronometerBaseMs)
+        } else {
+            builder.setUsesChronometer(false).setShowWhen(false)
+        }
+        if (isRecording || isPaused) {
+            builder.addExtras(android.os.Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+        }
+        return builder.build()
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        val mb = bytes / (1024.0 * 1024.0)
+        return if (mb >= 1024) String.format(Locale.US, "%.2f GB", mb / 1024)
+        else String.format(Locale.US, "%.1f MB", mb)
     }
 
     private fun servicePendingIntent(action: String): PendingIntent {

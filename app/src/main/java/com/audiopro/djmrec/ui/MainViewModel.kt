@@ -15,6 +15,7 @@ import com.audiopro.djmrec.DjmRecApplication
 import com.audiopro.djmrec.audio.AudioEngine
 import com.audiopro.djmrec.audio.ChannelLevel
 import com.audiopro.djmrec.audio.RecordingFormat
+import com.audiopro.djmrec.audio.RecordingHealth
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.audio.StereoLevels
 import com.audiopro.djmrec.service.RecordingService
@@ -49,6 +50,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val GAIN_DB_MAX = 24f
         private const val KEY_MONITORING_ENABLED = "monitoring_enabled"
         private const val KEY_MAX_FILE_SIZE_MB = "max_file_size_mb"
+        private const val KEY_RECORDING_FORMAT = "recording_format"
     }
 
     private val usbAudioManager = (application as DjmRecApplication).usbAudioManager
@@ -65,6 +67,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _elapsedMillis = MutableStateFlow(0L)
     val elapsedMillis: StateFlow<Long> = _elapsedMillis.asStateFlow()
+
+    private val _trackMarkCount = MutableStateFlow(0)
+    val trackMarkCount: StateFlow<Int> = _trackMarkCount.asStateFlow()
+
+    private val _lowStorageWarning = MutableStateFlow(false)
+    val lowStorageWarning: StateFlow<Boolean> = _lowStorageWarning.asStateFlow()
+
+    private val _health = MutableStateFlow(RecordingHealth())
+    val health: StateFlow<RecordingHealth> = _health.asStateFlow()
 
     private val emptyWaveform = FloatArray(0)
     private val _waveformBins = MutableStateFlow(emptyWaveform)
@@ -85,7 +96,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _maxFileSizeMb = MutableStateFlow(prefs.getInt(KEY_MAX_FILE_SIZE_MB, 0))
     val maxFileSizeMb: StateFlow<Int> = _maxFileSizeMb.asStateFlow()
 
-    private val _selectedFormat = MutableStateFlow(RecordingFormat.WAV)
+    // FLAC by default: lossless like WAV at roughly half the size -- faster Drive/SoundCloud
+    // uploads and more takes per GB. The last explicit choice is remembered across launches.
+    private val _selectedFormat = MutableStateFlow(
+        RecordingFormat.entries.firstOrNull { it.name == prefs.getString(KEY_RECORDING_FORMAT, null) }
+            ?: RecordingFormat.FLAC
+    )
     val selectedFormat: StateFlow<RecordingFormat> = _selectedFormat.asStateFlow()
     val availableFormats: List<RecordingFormat> = RecordingFormat.entries
 
@@ -120,6 +136,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { service.levels.collect { _levels.value = it } }
             viewModelScope.launch { service.elapsedMillis.collect { _elapsedMillis.value = it } }
             viewModelScope.launch { service.waveformBins.collect { _waveformBins.value = it } }
+            viewModelScope.launch { service.trackMarkCount.collect { _trackMarkCount.value = it } }
+            viewModelScope.launch { service.lowStorageWarning.collect { _lowStorageWarning.value = it } }
+            viewModelScope.launch { service.health.collect { _health.value = it } }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -169,6 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _recordingState.value is RecordingState.Error) &&
             format in availableFormats) {
             _selectedFormat.value = format
+            prefs.edit().putString(KEY_RECORDING_FORMAT, format.name).apply()
         }
     }
 
@@ -202,6 +222,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_MAX_FILE_SIZE_MB, sanitized).apply()
         _maxFileSizeMb.value = sanitized
         boundService?.setMaxFileSizeMb(sanitized)
+    }
+
+    /** Timestamps a track change during the current take; no-op outside Recording. */
+    fun markTrackChange() {
+        boundService?.markTrackChange()
     }
 
     fun rescanUsbDevices() {

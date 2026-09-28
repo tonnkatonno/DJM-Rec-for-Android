@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -71,6 +72,8 @@ fun RecorderScreen(viewModel: MainViewModel) {
     val otgStatus by viewModel.otgStatus.collectAsState()
     val usbChannelOffset by viewModel.usbChannelOffset.collectAsState()
     val maxFileSizeMb by viewModel.maxFileSizeMb.collectAsState()
+    val trackMarkCount by viewModel.trackMarkCount.collectAsState()
+    val lowStorageWarning by viewModel.lowStorageWarning.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(device?.deviceName) {
@@ -119,6 +122,22 @@ fun RecorderScreen(viewModel: MainViewModel) {
                 onMonitoringChanged = viewModel::setMonitoringEnabled
             )
 
+            if (lowStorageWarning) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = NfPanelShape,
+                    border = BorderStroke(1.dp, com.audiopro.djmrec.ui.theme.AccentAmber),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Low storage -- less than 500 MB free. Free up space or this take may run out of room.",
+                        color = com.audiopro.djmrec.ui.theme.AccentAmber,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            }
+
             if (recordingState is RecordingState.Error) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -153,6 +172,8 @@ fun RecorderScreen(viewModel: MainViewModel) {
         TransportSection(
             state = recordingState,
             elapsedMillis = elapsedMillis,
+            trackMarkCount = trackMarkCount,
+            onMark = viewModel::markTrackChange,
             onRecord = viewModel::startRecording,
             onPause = viewModel::pauseRecording,
             onResume = viewModel::resumeRecording,
@@ -288,6 +309,8 @@ private fun StatePill(state: RecordingState) {
 private fun TransportSection(
     state: RecordingState,
     elapsedMillis: Long,
+    trackMarkCount: Int,
+    onMark: () -> Unit,
     onRecord: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -310,6 +333,18 @@ private fun TransportSection(
             onResume = onResume,
             onStop = onStop
         )
+        if (state is RecordingState.Recording) {
+            OutlinedButton(
+                onClick = onMark,
+                shape = RoundedCornerShape(3.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+            ) {
+                Text(
+                    if (trackMarkCount > 0) "MARK TRACK ($trackMarkCount)" else "MARK TRACK",
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
         Text(
             text = when (state) {
                 is RecordingState.Recording -> "Recording to Music/DJMRec"

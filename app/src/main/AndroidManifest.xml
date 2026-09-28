@@ -13,6 +13,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Android 13+ runtime notification permission for the persistent recording notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 16 Live Updates: lets the recording notification be promoted to a status-bar
+         chip / prominent lock-screen card. Normal permission, no prompt; ignored before 16. -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <!-- Read every recording in Music/DJMRec, not just the ones this install created: after a
+         reinstall / "clear data", or for takes made by the debug vs. release variant, scoped
+         storage otherwise hides those files from File.listFiles() entirely. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <!-- Needed for resolveActivity() on Android 11+ (package visibility). -->
     <queries>
