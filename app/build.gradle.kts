@@ -1,10 +1,13 @@
 import java.io.FileInputStream
 import java.util.Properties
+import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services")
+    id("com.google.firebase.crashlytics")
 }
 
 // ── Keystore helpers (top-level so they can be used by signingConfigs) ─────
@@ -18,6 +21,16 @@ fun loadProperties(path: String): Properties = Properties().apply {
 val appVersion = loadProperties("version.properties")
 val keystoreFile = rootProject.file("keystore.properties")
 val keystore = if (keystoreFile.exists()) loadProperties("keystore.properties") else null
+val streamingFile = rootProject.file("streaming.properties")
+val streaming = if (streamingFile.exists()) loadProperties("streaming.properties") else null
+val twitchClientId = providers.environmentVariable("TWITCH_CLIENT_ID").orNull
+    ?: streaming?.getProperty("TWITCH_CLIENT_ID").orEmpty()
+// OAuth client IDs are public identifiers. Google still authenticates Android builds using the
+// package name and signing certificate registered against each ID in Google Cloud.
+val googleLocalClientId =
+    "333115759527-9i5hsmubo1up8d7qvqjbgfm2ur9inkvl.apps.googleusercontent.com"
+val googlePublicClientId =
+    "333115759527-o8poec8lbsa8c98mkpb2k52g7mist9o6.apps.googleusercontent.com"
 
 // OAuth client IDs/secrets (Drive, SoundCloud, ...). File is gitignored; see
 // secrets.properties.example for the expected keys. Missing file/keys just leave the
@@ -29,7 +42,7 @@ fun secret(key: String): String = secrets.getProperty(key, "")
 
 android {
     namespace = "com.audiopro.djmrec"
-    compileSdk = 34
+    compileSdk = 35
     // Pinned so CI (and every dev machine) builds native code against the exact same
     // NDK — avoids "works locally, fails/behaves differently in CI" native-build drift.
     ndkVersion = "26.1.10909125"
@@ -49,6 +62,9 @@ android {
         targetSdk = 34
         versionCode = appVersion.getProperty("VERSION_CODE").toInt()
         versionName = appVersion.getProperty("VERSION_NAME")
+        buildConfigField("String", "TWITCH_CLIENT_ID", "\"${twitchClientId.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "GOOGLE_OAUTH_CLIENT_ID", "\"$googlePublicClientId\"")
+        buildConfigField("boolean", "FIREBASE_CONFIGURED", "true")
 
         // Only ship arm64-v8a: all modern DJ-capable Android hardware (USB-C host + UAC2)
         // is 64-bit ARM. Keeping a single ABI keeps the native audio path easy to validate.
@@ -80,16 +96,27 @@ android {
                 "proguard-rules.pro"
             )
             signingConfig = releaseSigning
+            configure<CrashlyticsExtension> {
+                nativeSymbolUploadEnabled = true
+            }
         }
         debug {
             isDebuggable = true
             // So debug and release can be installed side-by-side
             applicationIdSuffix = ".debug"
+            buildConfigField("String", "GOOGLE_OAUTH_CLIENT_ID", "\"$googleLocalClientId\"")
+            buildConfigField("boolean", "FIREBASE_CONFIGURED", "false")
         }
         create("local") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release")
+            buildConfigField("String", "GOOGLE_OAUTH_CLIENT_ID", "\"$googleLocalClientId\"")
+            buildConfigField("boolean", "FIREBASE_CONFIGURED", "false")
+            configure<CrashlyticsExtension> {
+                mappingFileUploadEnabled = false
+                nativeSymbolUploadEnabled = false
+            }
         }
     }
 
@@ -115,10 +142,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -142,7 +165,23 @@ android {
     }
 }
 
+// Firebase is production-only. Keep debug/local builds isolated from production reports and make
+// ordinary contributor builds work without the gitignored Firebase configuration file.
+tasks.matching { it.name in setOf("processDebugGoogleServices", "processLocalGoogleServices") }
+    .configureEach {
+        enabled = false
+    }
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
+    implementation("com.google.firebase:firebase-analytics")
+    implementation("com.google.firebase:firebase-crashlytics-ndk")
     testImplementation(kotlin("test"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
@@ -152,13 +191,15 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("androidx.activity:activity-compose:1.9.1")
 
-    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.github.pedroSG94.RootEncoder:library:2.7.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

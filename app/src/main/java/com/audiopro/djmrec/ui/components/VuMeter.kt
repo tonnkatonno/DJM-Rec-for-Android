@@ -17,27 +17,34 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import com.audiopro.djmrec.audio.ChannelLevel
 import com.audiopro.djmrec.audio.StereoLevels
+import com.audiopro.djmrec.ui.theme.BackgroundDark
 import com.audiopro.djmrec.ui.theme.MeterAmber
 import com.audiopro.djmrec.ui.theme.MeterGreen
 import com.audiopro.djmrec.ui.theme.MeterRed
+import com.audiopro.djmrec.ui.theme.SurfaceVariantDark
 import kotlinx.coroutines.delay
 
 private const val METER_FLOOR_DB = -60f
 private const val METER_CEILING_DB = 3f
 private const val CLIP_LATCH_MS = 1500L
+private const val PEAK_HOLD_MS = 2000L
 
 private fun dbToFraction(db: Float): Float =
     ((db - METER_FLOOR_DB) / (METER_CEILING_DB - METER_FLOOR_DB)).coerceIn(0f, 1f)
@@ -49,8 +56,10 @@ private fun colorForFraction(fraction: Float): Color = when {
 }
 
 /**
- * Horizontal stereo VU meter. Two horizontal bars (L on top, R below) with clip indicators
- * and a compact dB scale row beneath. Designed for a CDJ-style stacked layout.
+ * Horizontal stereo VU meter. Two horizontal bars (L on top, R below) with clip indicators,
+ * a peak-hold marker + latched dB readout, and a compact dB scale row beneath. The peak
+ * marker holds the true maximum for [PEAK_HOLD_MS] before falling back to the live peak,
+ * hardware-meter style, so the actual peak of the take stays readable at a glance.
  */
 @Composable
 fun StereoVuMeter(levels: StereoLevels, modifier: Modifier = Modifier) {
@@ -71,8 +80,21 @@ private fun HorizontalChannelMeter(label: String, level: ChannelLevel) {
     LaunchedEffect(level.isClipping) {
         if (level.isClipping) {
             clipLatched = true
+        } else {
             delay(CLIP_LATCH_MS)
             clipLatched = false
+        }
+    }
+
+    // Peak hold: latch every new maximum; once the hold window passes without one, fall
+    // back to the live peak so the marker and readout show the take's real peak value.
+    var heldPeak by remember { mutableStateOf(level.peakDb) }
+    var heldSince by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(level.peakDb) {
+        val now = System.currentTimeMillis()
+        if (level.peakDb >= heldPeak || now - heldSince >= PEAK_HOLD_MS) {
+            heldPeak = level.peakDb
+            heldSince = now
         }
     }
 
@@ -81,11 +103,14 @@ private fun HorizontalChannelMeter(label: String, level: ChannelLevel) {
         animationSpec = tween(durationMillis = 80),
         label = "rmsFraction"
     )
-    val peakFraction = dbToFraction(level.peakDb)
+    val heldFraction = dbToFraction(heldPeak)
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+            contentDescription = "$label input, peak ${heldPeak.toInt()} dBFS" +
+                if (clipLatched) ", clipping" else ""
+        }
     ) {
         // Channel label
         Text(
@@ -104,7 +129,7 @@ private fun HorizontalChannelMeter(label: String, level: ChannelLevel) {
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRoundRect(
-                    color = if (clipLatched) MeterRed else Color(0xFF222433),
+                    color = if (clipLatched) MeterRed else SurfaceVariantDark,
                     cornerRadius = CornerRadius(3f, 3f)
                 )
             }
@@ -115,16 +140,16 @@ private fun HorizontalChannelMeter(label: String, level: ChannelLevel) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawHorizontalMeterTrack()
                 drawHorizontalMeterFill(rmsFraction)
-                drawHorizontalPeakLine(peakFraction)
+                drawHorizontalPeakLine(heldFraction)
             }
         }
 
-        // Peak dB readout
+        // Latched peak dB readout (tabular figures via the monospace label style)
         Text(
-            text = "${level.peakDb.toInt()}",
+            text = "${if (heldPeak > 0) "+" else ""}${heldPeak.toInt()}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(28.dp).padding(start = 6.dp)
+            modifier = Modifier.width(34.dp).padding(start = 6.dp)
         )
     }
 }
@@ -132,17 +157,28 @@ private fun HorizontalChannelMeter(label: String, level: ChannelLevel) {
 @Composable
 private fun HorizontalDbScale() {
     val marks = listOf(-60, -48, -36, -24, -12, -6, 0, 3)
-    Row(
+    Layout(
         modifier = Modifier.fillMaxWidth().padding(start = 30.dp, end = 34.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        marks.forEach { db ->
-            Text(
-                text = if (db > 0) "+$db" else "$db",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
-                modifier = Modifier.width(24.dp)
-            )
+        content = {
+            marks.forEach { db ->
+                Text(
+                    text = if (db > 0) "+$db" else "$db",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                )
+            }
+        }
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0)) }
+        val height = placeables.maxOfOrNull { it.height } ?: 0
+        layout(constraints.maxWidth, height) {
+            placeables.forEachIndexed { index, placeable ->
+                val fraction = dbToFraction(marks[index].toFloat())
+                val centeredX = (constraints.maxWidth * fraction - placeable.width / 2f).toInt()
+                val maxX = (constraints.maxWidth - placeable.width).coerceAtLeast(0)
+                val x = centeredX.coerceIn(0, maxX)
+                placeable.placeRelative(x, 0)
+            }
         }
     }
 }
@@ -151,7 +187,7 @@ private fun HorizontalDbScale() {
 
 private fun DrawScope.drawHorizontalMeterTrack() {
     drawRoundRect(
-        color = Color(0xFF11141D),
+        color = BackgroundDark,
         cornerRadius = CornerRadius(6f, 6f)
     )
 }

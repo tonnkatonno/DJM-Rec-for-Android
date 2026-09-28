@@ -1,24 +1,24 @@
-﻿package com.audiopro.djmrec.ui
+package com.audiopro.djmrec.ui
 
-import android.content.Intent
-import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,26 +26,32 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import com.audiopro.djmrec.diagnostics.LogExporter
-import com.audiopro.djmrec.integrations.icecast.IcecastStreamManager
-import java.io.File
+import com.audiopro.djmrec.diagnostics.RemoteDiagnostics
+import com.audiopro.djmrec.ui.theme.AccentGreen
+import com.audiopro.djmrec.ui.theme.AccentRed
+import com.audiopro.djmrec.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
 fun DiagnosticsScreen() {
-    val context = LocalContext.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
+    var description by rememberSaveable { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
-    var streamTesting by remember { mutableStateOf(false) }
-    var streamTestFile by remember { mutableStateOf<File?>(null) }
+    var sent by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -53,117 +59,111 @@ fun DiagnosticsScreen() {
     ) {
         Text("Support & diagnostics", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Create a technical report when USB capture or file encoding behaves unexpectedly.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            "Found a bug or a mixer that misbehaves? Send us a report and we will use it to fix support for more devices.",
+            color = TextSecondary
         )
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(4.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(20.dp)) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 Icon(
                     Icons.Filled.BugReport,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary
                 )
-                Spacer(Modifier.height(16.dp))
-                Text("Diagnostic report", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Includes app logs, USB descriptors, capture statistics, and current settings. Audio files are never included.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Text("Bug report", style = MaterialTheme.typography.titleMedium)
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it; sent = false; error = null },
+                    label = { Text("What went wrong?") },
+                    supportingText = {
+                        Text(if (description.isBlank()) "Required - a sentence or two helps us reproduce it."
+                            else "Include what you expected and what happened.")
+                    },
+                    isError = description.isBlank() && error != null,
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(Modifier.height(20.dp))
+                Text(
+                    "The report includes this phone and Android version, the connected mixer and its USB descriptors, audio devices, app settings and recent logs. No audio recordings or file names are included. Sending also enables crash reporting so the report can be delivered.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
                 Button(
-                    enabled = !exporting,
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    enabled = !sending && !exporting && description.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     onClick = {
-                        exporting = true
+                        sending = true
+                        sent = false
+                        error = null
                         scope.launch {
-                            try {
-                                val file = withContext(Dispatchers.IO) {
-                                    val report = LogExporter.collectDiagnosticReport(context)
-                                    LogExporter.writeReportToFile(context, report)
-                                }
-                                LogExporter.shareReport(context, file)
-                            } catch (error: Exception) {
-                                Toast.makeText(
-                                    context,
-                                    "Failed to export logs: ${error.message}",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            } finally {
-                                exporting = false
+                            val report = withContext(Dispatchers.IO) {
+                                "USER DESCRIPTION:\n${description.trim()}\n\n" +
+                                    LogExporter.collectDiagnosticReport(context)
+                            }
+                            RemoteDiagnostics.sendManualReport(description, report) { ok ->
+                                sending = false
+                                if (ok) sent = true
+                                else error = "Could not send the report. Check your internet connection and try again."
                             }
                         }
                     }
                 ) {
-                    if (exporting) {
+                    if (sending) {
                         CircularProgressIndicator(
                             modifier = Modifier.height(24.dp),
                             strokeWidth = 2.dp
                         )
                     } else {
-                        Text("Create and share report")
+                        Text("Send report")
                     }
                 }
-            }
-        }
-
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(4.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Icon(
-                    Icons.Filled.GraphicEq,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.height(16.dp))
-                Text("Live-stream encoder test", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(6.dp))
                 Text(
-                    "Development check for the Icecast live-streaming feature: encodes the " +
-                        "current input to a local .aac file so the encoder path can be verified " +
-                        "by ear before the network side exists. Needs a capture stream already " +
-                        "open (e.g. monitoring or recording active).",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    when {
+                        sending -> "Collecting diagnostics and sending..."
+                        sent -> "Report sent - thank you!"
+                        else -> ""
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (sent) AccentGreen else TextSecondary,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
                 )
-                Spacer(Modifier.height(20.dp))
-                Button(
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                error?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AccentRed,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                    )
+                }
+                OutlinedButton(
+                    enabled = !exporting && !sending,
+                    modifier = Modifier.fillMaxWidth(),
                     onClick = {
-                        if (streamTesting) {
-                            scope.launch {
-                                IcecastStreamManager.stopAndAwait()
-                                streamTesting = false
-                                streamTestFile?.let { file ->
-                                    shareTestFile(context, file)
+                        exporting = true
+                        scope.launch {
+                            runCatching {
+                                val file = withContext(Dispatchers.IO) {
+                                    val report = LogExporter.collectDiagnosticReport(context)
+                                    LogExporter.writeReportToFile(context, report)
                                 }
+                                LogExporter.shareReport(context, file)
+                            }.onFailure {
+                                error = "Could not export a copy: ${it.message ?: "unknown error"}"
                             }
-                        } else {
-                            streamTestFile = IcecastStreamManager.startLocalFileTest(context)
-                            streamTesting = true
+                            exporting = false
                         }
                     }
                 ) {
-                    Text(if (streamTesting) "Stop test and share .aac" else "Start encoder test")
+                    Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.height(18.dp))
+                    Text(" Export a copy instead")
                 }
             }
         }
     }
-}
-
-private fun shareTestFile(context: android.content.Context, file: File) {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "audio/aac"
-        putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_SUBJECT, "djmrec stream encoder test")
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    context.startActivity(Intent.createChooser(intent, "Share stream test file"))
 }

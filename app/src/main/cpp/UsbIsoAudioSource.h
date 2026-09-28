@@ -1,4 +1,5 @@
 #pragma once
+#include "ChannelActivity.h"
 
 #include <atomic>
 #include <array>
@@ -110,7 +111,7 @@ private:
     void handleCompletedTransfer(libusb_transfer* transfer);
     void handlePlaybackTransfer(libusb_transfer* transfer);
     void demuxAndEmit(const uint8_t* data, size_t length);
-    void updateMeasuredSampleRate(size_t frameCount);
+    void updateMeasuredSampleRate(size_t payloadBytes);
     bool submitTransfer(libusb_transfer* transfer);
     bool submitPlaybackTransfer(libusb_transfer* transfer);
     bool startPioneerPlaybackSilence(int sampleRate);
@@ -133,9 +134,9 @@ private:
     int mClaimedClockControlInterface = -1;
     int mClaimedPlaybackInterface = -1;
     const PioneerMixerProfile* mMixerProfile = nullptr;
-    std::array<int, 5> mPioneerOriginalSources{{-1, -1, -1, -1, -1}};
-    std::array<int, 5> mPioneerAppliedSources{{-1, -1, -1, -1, -1}};
-    std::array<bool, 5> mPioneerRoutesChanged{{false, false, false, false, false}};
+    std::array<int, 6> mPioneerOriginalSources{{-1, -1, -1, -1, -1, -1}};
+    std::array<int, 6> mPioneerAppliedSources{{-1, -1, -1, -1, -1, -1}};
+    std::array<bool, 6> mPioneerRoutesChanged{{false, false, false, false, false, false}};
     mutable std::mutex mDiagnosticMutex;
     std::vector<libusb_transfer*> mTransfers;
     std::vector<libusb_transfer*> mPlaybackTransfers;
@@ -144,6 +145,10 @@ private:
     int mPlaybackMaxPacketSize = 0;
     uint64_t mPlaybackFrameRemainder = 0;
     std::atomic<int> mPioneerFallbackStage{0};
+    // -999 means no request was sent; libusb errors use -1 through -99.
+    std::atomic<int> mEndpointRateSetResult{-999};
+    std::atomic<int> mDjm450RouteSetResult{-999};
+    std::atomic<int> mDjm450RouteValue{-1};
 
     std::atomic<bool> mRunning{false};
     std::atomic<int> mOutstandingTransfers{0};
@@ -160,8 +165,11 @@ private:
     std::vector<uint8_t> mWorking;   // scratch: carryover + newest packet, reused per call
     std::vector<int32_t> mScratch;   // reusable decode buffer, grown as needed
     std::vector<uint32_t> mPairPeaks;
+    ChannelActivity mChannelActivity;
     std::atomic<int> mResolvedChannelOffset{-1};
     size_t mFramesSincePeakLog = 0;
+    bool mLoggedPayloadWindow = false;
+    bool mLoggedPayloadSignal = false;
     uint64_t mBytesSincePeakLog = 0;
     uint64_t mNonZeroBytesSincePeakLog = 0;
     int mRawPacketDumpsLogged = 0; // caps one-time hex dumps of raw iso packet payload at capture start
@@ -170,9 +178,12 @@ private:
     std::mutex mRateProbeMutex;
     std::condition_variable mRateProbeReady;
     std::chrono::steady_clock::time_point mRateProbeStart{};
-    uint64_t mRateProbeFrames = 0;
+    uint64_t mRateProbeBytes = 0;
     bool mRateProbeStarted = false;
-    bool mRateProbeResolved = false;
+    std::atomic<bool> mRateProbeResolved{false};
+    uint64_t mRateProbePackets = 0;
+    int mCapturePacketsPerSecond = 0;
+    int mConfirmedClockRate = 0;
 };
 
 } // namespace djmrec

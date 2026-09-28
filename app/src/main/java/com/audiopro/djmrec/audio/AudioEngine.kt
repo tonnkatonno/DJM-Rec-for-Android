@@ -74,20 +74,30 @@ object AudioEngine {
         sampleRateHint: Int
     ): Int
 
-    external fun openRootAlsa(
-        card: Int,
-        device: Int,
-        sampleRate: Int,
-        channels: Int,
-        bitDepth: Int,
-        extractChannelOffset: Int
-    ): Int
-
     /**
      * Begins pulling from the ring buffer into the selected encoder and writing to [outputPath].
      * [format] is [RecordingFormat.nativeValue].
      */
     external fun startRecording(outputPath: String, format: Int): Boolean
+
+    external fun startRecordingFd(fd: Int, format: Int): Boolean
+
+    external fun rollRecordingFd(fd: Int, format: Int): Boolean
+
+    /** Flushes a recoverable checkpoint and returns current part bytes, or -1 on failure. */
+    external fun checkpointRecording(): Long
+
+    external fun getRecordingErrorCode(): Int
+
+    external fun isStreamOpen(): Boolean
+
+    /** Starts/stops independent stereo PCM tap used by AAC livestream encoder. */
+    external fun startLivePcm(): Boolean
+
+    external fun stopLivePcm()
+
+    /** Reads little-endian stereo PCM16 without consuming recording writer data. */
+    external fun readLivePcm16(destination: ByteArray): Int
 
     external fun pauseRecording()
 
@@ -102,16 +112,14 @@ object AudioEngine {
     /**
      * Instantaneous stereo meter reading, in the layout
      * `[leftPeakDb, leftRmsDb, rightPeakDb, rightRmsDb]`, already scaled to dBFS in
-     * [-60, 0]. Intended to be polled at UI frame rate (~30-60 Hz) from a coroutine.
+     * Trailing floats: committed cursor modulo 1048576, then bin duration in milliseconds.
+     * Polled by the monitoring thread; UI scrolling uses the display frame clock.
      */
     external fun getLevels(): FloatArray
 
     external fun isClipping(): Boolean
 
     external fun getElapsedMillis(): Long
-
-    /** Sample rate of the currently open capture stream, or 0 if none is open. */
-    external fun getCurrentSampleRate(): Int
 
     /** Underrun/overrun counters on the ring buffer, useful for diagnosing dropped audio. */
     external fun getXRunCount(): Int
@@ -123,46 +131,56 @@ object AudioEngine {
     external fun getDiagnosticSummary(): String
 
     /**
-     * RGB waveform snapshot: returns `kWaveformBinCount * 4` floats in the layout
+     * RGB waveform snapshot: returns `kWaveformBinCount * 4 + 2` floats in the layout
      * `[amp0, low0, mid0, high0, amp1, low1, mid1, high1, ...]`, each in [0, 1].
      * Low ≈ red, mid ≈ green, high ≈ blue — the CDJ-3000 color mapping.
-     * Intended to be polled at ~15–30 Hz from the UI thread.
+     * Trailing floats: committed cursor modulo 1048576, then bin duration in milliseconds.
+     * Polled by the monitoring thread; UI scrolling uses the display frame clock.
      */
     external fun getWaveformBins(): FloatArray
 
     /** Enables native frequency analysis for the optional live waveform. */
+    external fun setRecordingGainDb(gainDb: Int)
+
     external fun setWaveformEnabled(enabled: Boolean)
 
     /**
-     * Linear input gain applied to every captured sample, on every capture path, before
-     * metering and before it reaches the recorded file -- so the VU meter and the recording
-     * always agree. Takes effect immediately, including on an already-open stream. Clamped
-     * internally to +/-24dB.
+     * Applies to the next [startRecording]/[startRecordingFd]: drop the digital silence before
+     * the first audible sample (about -60 dBFS), keeping a short pre-roll before the onset.
      */
-    external fun setGainDb(db: Float)
+    external fun setTrimLeadingSilence(enabled: Boolean)
+
+    /** True while a recording is running but still discarding leading silence. */
+    external fun isAwaitingAudio(): Boolean
+
+    /** Look-ahead safety limiter at -1 dBFS on the recording gain stage (default on). */
+    external fun setLimiterEnabled(enabled: Boolean)
+
+    /** Largest limiter gain reduction since the previous call, in dB (0 when not limiting). */
+    external fun takeLimiterReductionDb(): Float
+
+    /** Keep the last 15 s while monitoring and prepend them when recording starts. */
+    external fun setPreRecordEnabled(enabled: Boolean)
+
+    /** Silent audio (below about -60 dBFS) at the end of the file so far, in ms. */
+    external fun getTrailingSilenceMillis(): Long
 
     /**
-     * Live headphone/output monitoring of the (gained) captured signal, independent of
+     * Opens a second writer (e.g. an MP3 copy of a WAV/FLAC set) that the next
+     * [startRecordingFd] fills with the same audio. Call while not recording.
+     */
+    external fun prepareCompanionFd(fd: Int, format: Int): Boolean
+
+    external fun clearPendingCompanion()
+
+    /** Non-zero once the companion writer failed; the master recording is unaffected. */
+    external fun getCompanionErrorCode(): Int
+
+    /**
+     * Live headphone/output monitoring of the processed captured signal, independent of
      * recording -- lets the user hear crackle/clipping in real time. Standard Android output
-     * routing applies (wired/BT headset if connected, phone speaker otherwise). Safe to call
-     * at any time, including before a capture stream is open (takes effect once one opens).
+     * routing applies (wired/BT headset if connected, phone speaker otherwise). Safe to call at
+     * any time, including before a capture stream is open (takes effect once one opens).
      */
     external fun setMonitoringEnabled(enabled: Boolean)
-
-    /**
-     * Enables/disables a dedicated native ring buffer feeding the live-stream (Icecast) encoder
-     * path, independent of recording-to-file and monitoring. Takes effect immediately if a
-     * capture stream is already open, or on the next open*() call otherwise. Nothing is played
-     * back or sent anywhere by the native side itself -- it only ever produces PCM for
-     * [pullStreamPcm16] to pull.
-     */
-    external fun setStreamingEnabled(enabled: Boolean)
-
-    /**
-     * Consumer-side pull for the live-stream path: returns up to [maxFrames] interleaved stereo
-     * 16-bit PCM frames (downconverted from the capture format on the native side), or null if
-     * streaming is disabled, no capture stream is open, or the buffer is momentarily empty.
-     * Not safe to call concurrently from more than one thread/coroutine.
-     */
-    external fun pullStreamPcm16(maxFrames: Int): ShortArray?
 }

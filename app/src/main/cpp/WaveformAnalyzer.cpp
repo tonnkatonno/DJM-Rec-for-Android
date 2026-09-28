@@ -16,7 +16,7 @@ void WaveformAnalyzer::designLowPass(BandFilter& f, float cutoffHz, float sample
     const float w0 = 2.0f * static_cast<float>(M_PI) * cutoffHz / sampleRate;
     const float cosW0 = std::cos(w0);
     const float sinW0 = std::sin(w0);
-    const float alpha = sinW0 / (2.0f * 1.41421356f); // Q = 1/sqrt(2) for Butterworth
+    const float alpha = sinW0 / (2.0f * 0.70710678f); // Q = 1/sqrt(2) for Butterworth
 
     const float b0 = (1.0f - cosW0) / 2.0f;
     const float b1 = 1.0f - cosW0;
@@ -36,7 +36,7 @@ void WaveformAnalyzer::designHighPass(BandFilter& f, float cutoffHz, float sampl
     const float w0 = 2.0f * static_cast<float>(M_PI) * cutoffHz / sampleRate;
     const float cosW0 = std::cos(w0);
     const float sinW0 = std::sin(w0);
-    const float alpha = sinW0 / (2.0f * 1.41421356f);
+    const float alpha = sinW0 / (2.0f * 0.70710678f);
 
     const float b0 = (1.0f + cosW0) / 2.0f;
     const float b1 = -(1.0f + cosW0);
@@ -59,20 +59,21 @@ void WaveformAnalyzer::designHighPass(BandFilter& f, float cutoffHz, float sampl
 WaveformAnalyzer::WaveformAnalyzer(int sampleRate) {
     const float sr = static_cast<float>(std::max(sampleRate, 8000));
     mFramesPerBin = std::max(1, static_cast<int>(sr / 163.0f));
+    mBinDurationMillis = 1000.0f * mFramesPerBin / sr;
 
     // Low band: 20–250 Hz → red
-    designLowPass(mLowFilter, 250.0f, sr);
+    for (auto& filter : mLowFilter) designLowPass(filter, 250.0f, sr);
 
     // Mid band: 250–2000 Hz → green
     // Constructed as: low-pass @ 2000Hz applied after high-pass @ 250Hz.
     // hpf(250) strips lows; lpf(2000) strips highs → band-pass.
-    designHighPass(mMidFilter1, 250.0f, sr);
-    designLowPass(mMidFilter2, 2000.0f, sr);
+    for (auto& filter : mMidFilter1) designHighPass(filter, 250.0f, sr);
+    for (auto& filter : mMidFilter2) designLowPass(filter, 2000.0f, sr);
 
     // High band: 2000–20000 Hz → blue
-    designHighPass(mHighFilter, 2000.0f, sr);
+    for (auto& filter : mHighFilter) designHighPass(filter, 2000.0f, sr);
 
-    // Write buffer starts as buffer A; read buffer points to buffer B (empty).
+    // Start with an empty rolling history.
     for (auto& value : mBins) value.store(0.0f, std::memory_order_relaxed);
 }
 
@@ -87,28 +88,24 @@ void WaveformAnalyzer::pushFrames(const int32_t* interleavedStereo, size_t frame
         // Mix stereo → mono (average L+R).
         const float left  = static_cast<float>(interleavedStereo[i * 2])     / kMaxAmplitude;
         const float right = static_cast<float>(interleavedStereo[i * 2 + 1]) / kMaxAmplitude;
-        const float mono  = (left + right) * 0.5f;
-
-        accumulateSample(mono);
+        accumulateSample(left, right);
     }
 }
 
-void WaveformAnalyzer::accumulateSample(float mono) {
+void WaveformAnalyzer::accumulateSample(float left, float right) {
     BinAccum& bin = mCurrent;
-
-    // Run through the three band filters.
-    const float low  = mLowFilter.process(mono);
-    const float mid  = mMidFilter2.process(mMidFilter1.process(mono));
-    const float high = mHighFilter.process(mono);
-
-    // Peak amplitude (full-band waveform envelope).
-    const float absMono = std::fabs(mono);
-    if (absMono > bin.peakAbs) bin.peakAbs = absMono;
-
-    // Band energy accumulation (rectified average — cheap, effective).
-    bin.lowSum  += std::fabs(low);
-    bin.midSum  += std::fabs(mid);
-    bin.highSum += std::fabs(high);
+    // Never sum L+R before analysis: opposite-phase stereo is still real audio.
+    const float samples[] = {left, right};
+    for (int channel = 0; channel < 2; ++channel) {
+        const float sample = samples[channel];
+        const float low = mLowFilter[channel].process(sample);
+        const float mid = mMidFilter2[channel].process(mMidFilter1[channel].process(sample));
+        const float high = mHighFilter[channel].process(sample);
+        bin.peakAbs = std::max(bin.peakAbs, std::fabs(sample));
+        bin.lowSum += std::fabs(low) * 0.5f;
+        bin.midSum += std::fabs(mid) * 0.5f;
+        bin.highSum += std::fabs(high) * 0.5f;
+    }
     bin.sampleCount++;
 
     if (bin.sampleCount >= mFramesPerBin) {
@@ -117,7 +114,8 @@ void WaveformAnalyzer::accumulateSample(float mono) {
 }
 
 void WaveformAnalyzer::commitBin() {
-    const int index = mWriteIndex.load(std::memory_order_relaxed);
+    const uint32_t committed = mCommitted.load(std::memory_order_relaxed);
+    const int index = committed % kRingCount;
     const int base = index * 4;
     const float invN = mCurrent.sampleCount > 0
         ? 1.0f / static_cast<float>(mCurrent.sampleCount) : 0.0f;
@@ -125,7 +123,7 @@ void WaveformAnalyzer::commitBin() {
     mBins[base + 1].store(mCurrent.lowSum * invN, std::memory_order_relaxed);
     mBins[base + 2].store(mCurrent.midSum * invN, std::memory_order_relaxed);
     mBins[base + 3].store(mCurrent.highSum * invN, std::memory_order_release);
-    mWriteIndex.store((index + 1) % kBinCount, std::memory_order_release);
+    mCommitted.store(committed + 1, std::memory_order_release);
     mCurrent = {};
 }
 
@@ -133,27 +131,34 @@ void WaveformAnalyzer::commitBin() {
 // Reader — called from UI polling thread.
 // ---------------------------------------------------------------------------
 
-void WaveformAnalyzer::getBins(float* outBins) const {
-    const int start = mWriteIndex.load(std::memory_order_acquire);
-    for (int i = 0; i < kBinCount; ++i) {
-        const int sourceBase = ((start + i) % kBinCount) * 4;
-        const int targetBase = i * 4;
-        outBins[targetBase + 0] = mBins[sourceBase + 0].load(std::memory_order_relaxed);
-        outBins[targetBase + 1] = mBins[sourceBase + 1].load(std::memory_order_relaxed);
-        outBins[targetBase + 2] = mBins[sourceBase + 2].load(std::memory_order_relaxed);
-        outBins[targetBase + 3] = mBins[sourceBase + 3].load(std::memory_order_acquire);
+void WaveformAnalyzer::getBins(float* outBins, uint32_t* sequence) const {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t end = mCommitted.load(std::memory_order_acquire);
+        for (int i = 0; i < kBinCount; ++i) {
+            const int sourceBase = ((end - kBinCount + i) % kRingCount) * 4;
+            for (int band = 0; band < 4; ++band) {
+                outBins[i * 4 + band] = mBins[sourceBase + band].load(std::memory_order_relaxed);
+            }
+        }
+        if (mCommitted.load(std::memory_order_acquire) - end < kBinCount) {
+            if (sequence) *sequence = end;
+            return;
+        }
     }
+    // A severely stalled reader must not display torn history.
+    std::fill(outBins, outBins + kBinCount * 4, 0.0f);
+    if (sequence) *sequence = mCommitted.load(std::memory_order_acquire);
 }
 
 void WaveformAnalyzer::reset() {
-    mLowFilter.resetState();
-    mMidFilter1.resetState();
-    mMidFilter2.resetState();
-    mHighFilter.resetState();
+    for (auto& filter : mLowFilter) filter.resetState();
+    for (auto& filter : mMidFilter1) filter.resetState();
+    for (auto& filter : mMidFilter2) filter.resetState();
+    for (auto& filter : mHighFilter) filter.resetState();
 
     mCurrent = {};
     for (auto& value : mBins) value.store(0.0f, std::memory_order_relaxed);
-    mWriteIndex.store(0, std::memory_order_release);
+    mCommitted.store(0, std::memory_order_release);
 }
 
 } // namespace djmrec

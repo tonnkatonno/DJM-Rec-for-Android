@@ -7,6 +7,11 @@
 -keep class com.audiopro.djmrec.audio.** { *; }
 -keep class com.audiopro.djmrec.usb.** { *; }
 
+# Crashlytics 20.1 uses these API 37 classes only behind a runtime SDK check.
+# Keep R8 builds compatible with our lower compile SDK until API 37 is installed.
+-dontwarn android.os.ProfilingTrigger
+-dontwarn android.os.ProfilingTrigger$Builder
+
 # google-api-client / google-api-services-drive: JSON (de)serialization is reflection-based
 # (GenericJson field lookup by name), so model classes must keep their fields, and the libraries
 # reference some annotation/transport classes not present on Android that are safe to warn-away.

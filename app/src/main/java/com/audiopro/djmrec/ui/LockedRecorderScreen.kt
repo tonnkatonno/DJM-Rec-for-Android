@@ -35,7 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.audiopro.djmrec.audio.RecordingFormat
 import com.audiopro.djmrec.audio.RecordingHealth
+import com.audiopro.djmrec.audio.RecordingHealthLevel
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.ui.components.StereoVuMeter
 import com.audiopro.djmrec.ui.theme.AccentAmber
@@ -64,11 +66,13 @@ fun LockedRecorderScreen(viewModel: MainViewModel, onUnlock: () -> Unit) {
     val state by viewModel.recordingState.collectAsState()
     val elapsed by viewModel.elapsedMillis.collectAsState()
     val levels by viewModel.levels.collectAsState()
-    val health by viewModel.health.collectAsState()
+    val health by viewModel.recordingHealth.collectAsState()
+    val format by viewModel.selectedFormat.collectAsState()
+    val awaitingAudio by viewModel.awaitingAudio.collectAsState()
     val marks by viewModel.trackMarkCount.collectAsState()
 
     val isPaused = state is RecordingState.Paused
-    val problem = health.stalled || health.noSignal
+    val problem = health.level != RecordingHealthLevel.GOOD && health.level != RecordingHealthLevel.READY
     val statusColor = when {
         problem -> AccentAmber
         isPaused -> AccentCyan
@@ -115,7 +119,7 @@ fun LockedRecorderScreen(viewModel: MainViewModel, onUnlock: () -> Unit) {
                     color = TextPrimary
                 )
                 Spacer(Modifier.height(20.dp))
-                StatusPanel(health = health, isPaused = isPaused, color = statusColor)
+                StatusPanel(health = health, format = format, isPaused = isPaused, awaitingAudio = awaitingAudio, color = statusColor)
             }
 
             Column(Modifier.fillMaxWidth()) {
@@ -149,11 +153,22 @@ fun LockedRecorderScreen(viewModel: MainViewModel, onUnlock: () -> Unit) {
 }
 
 @Composable
-private fun StatusPanel(health: RecordingHealth, isPaused: Boolean, color: Color) {
+private fun StatusPanel(
+    health: RecordingHealth,
+    format: RecordingFormat,
+    isPaused: Boolean,
+    awaitingAudio: Boolean,
+    color: Color
+) {
     val headline = when {
-        health.stalled -> "⚠ FILE NOT GROWING"
-        health.noSignal -> "⚠ NO INPUT SIGNAL"
+        health.level == RecordingHealthLevel.ERROR -> "⚠ RECORDING PROBLEM"
+        health.level == RecordingHealthLevel.USB_UNSTABLE -> "⚠ USB UNSTABLE"
+        health.level == RecordingHealthLevel.SILENCE -> "⚠ NO INPUT SIGNAL"
+        health.level == RecordingHealthLevel.LOW_STORAGE -> "⚠ LOW STORAGE"
+        health.level == RecordingHealthLevel.LOW_BATTERY -> "⚠ LOW BATTERY"
+        health.level == RecordingHealthLevel.OVERHEATING -> "⚠ PHONE OVERHEATING"
         isPaused -> "NOTHING BEING WRITTEN"
+        awaitingAudio -> "ARMED · WAITING FOR AUDIO"
         else -> "✓ WRITING TO DISK"
     }
     Surface(
@@ -166,17 +181,19 @@ private fun StatusPanel(health: RecordingHealth, isPaused: Boolean, color: Color
             Text(headline, style = labelStyle.copy(fontSize = 15.sp), color = color)
             Spacer(Modifier.height(10.dp))
             Text(
-                listOfNotNull(health.format?.name, formatSizeLong(health.fileBytes)).joinToString("  ·  "),
+                format.name,
                 style = TextStyle(fontFamily = NfDisplayFontFamily, fontWeight = FontWeight.Bold, fontSize = 26.sp),
                 color = TextPrimary
             )
-            health.fileName?.let {
+            if (health.level != RecordingHealthLevel.GOOD && health.message.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(it, style = labelStyle, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(health.message, style = labelStyle, color = TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            if (health.xruns > 0) {
+            if (health.freeBytes > 0 && health.freeBytes != Long.MAX_VALUE) {
                 Spacer(Modifier.height(6.dp))
-                Text("${health.xruns} DROPOUTS", style = labelStyle, color = AccentAmber)
+                val remaining = health.remainingSeconds.takeIf { it in 1 until Long.MAX_VALUE }
+                    ?.let { "  ·  ~${formatClock(it * 1000)} LEFT" }.orEmpty()
+                Text("${formatSizeLong(health.freeBytes)} FREE$remaining", style = labelStyle, color = TextSecondary)
             }
         }
     }

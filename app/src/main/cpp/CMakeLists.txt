@@ -49,22 +49,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(flac)
 
 # ---------------------------------------------------------------------------
-# TinyALSA: root-only fallback that opens /dev/snd/pcmC*D*c directly when the
-# kernel exposes the DJM REC/phone port as an ALSA capture device but Android's
-# app-level USB audio stack returns digital silence.
-# ---------------------------------------------------------------------------
-set(TINYALSA_USES_PLUGINS OFF CACHE BOOL "" FORCE)
-set(TINYALSA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(TINYALSA_BUILD_UTILS OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    tinyalsa
-    GIT_REPOSITORY https://github.com/tinyalsa/tinyalsa.git
-    GIT_TAG        master
-)
-FetchContent_MakeAvailable(tinyalsa)
-
-# ---------------------------------------------------------------------------
 # libusb: raw isochronous USB-audio capture, bypassing AAudio/AudioRecord.
 #
 # Why this exists: Android's audio HAL only ever exposes a stereo (or, in the
@@ -138,16 +122,36 @@ if (NOT TARGET usb::usb)
 endif ()
 
 
+# ---------------------------------------------------------------------------
+# shine: fixed-point MPEG Layer III (MP3) encoder used by Mp3Writer for 320 kbps
+# CBR stereo output. Licensed under the GNU Library GPL v2 (see
+# THIRD_PARTY_NOTICES.md). Like libusb above it only ships autotools, so its
+# small src/lib/*.c set is compiled directly here; the public API is an
+# interleaved-int16 frame interface (src/lib/layer3.h).
+# ---------------------------------------------------------------------------
+FetchContent_Declare(
+    shine_src
+    GIT_REPOSITORY https://github.com/toots/shine.git
+    GIT_TAG        main
+)
+FetchContent_Populate(shine_src)
+
+file(GLOB SHINE_SOURCES ${shine_src_SOURCE_DIR}/src/lib/*.c)
+add_library(mp3shine STATIC ${SHINE_SOURCES})
+target_include_directories(mp3shine PUBLIC ${shine_src_SOURCE_DIR}/src)
+target_compile_options(mp3shine PRIVATE -Wno-unused-parameter -Wno-unused-function)
+
 add_library(
     djmrec_audio
     SHARED
     UsbAudioEngine.cpp
     UsbIsoAudioSource.cpp
-    AlsaPcmAudioSource.cpp
     WaveformAnalyzer.cpp
     writers/WavWriter.cpp
     writers/FlacWriter.cpp
+    writers/Mp3Writer.cpp
     jni/AudioEngineJNI.cpp
+    jni/AudioFileWriterJNI.cpp
 )
 
 target_include_directories(
@@ -162,7 +166,7 @@ target_link_libraries(
     PRIVATE
     oboe::oboe
     FLAC
-    tinyalsa
+    mp3shine
     usb::usb
     android
     log

@@ -1,106 +1,79 @@
+<div align="center">
+
 # DJM Rec for Android
 
-[![AGP](https://img.shields.io/badge/AGP-8.5.2-3DDC84?logo=android&logoColor=white)](https://developer.android.com/build)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0.20-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
-[![NDK](https://img.shields.io/badge/NDK-26.1-blue?logo=android&logoColor=white)](https://developer.android.com/ndk)
-[![Min SDK](https://img.shields.io/badge/minSdk-29-32DE84?logo=android&logoColor=white)]()
+**Record your DJ sets from a compatible USB mixer directly to your Android phone.**
 
-Open-source Android recorder for capturing DJ sets from Pioneer DJM mixer USB audio outputs.
+[![Download the latest APK](https://img.shields.io/badge/Download-latest%20APK-3ddc84?style=for-the-badge&logo=android&logoColor=black)](https://github.com/P2GR/DJM-Rec-for-Android/releases/latest)
 
-Android cannot select arbitrary stereo pairs from multichannel DJ mixer inputs. DJM Rec uses
-root-free `libusb` isochronous capture, temporarily routes MIX/REC OUT to a USB pair, then
-extracts that pair from the wire.
+![Android 10+](https://img.shields.io/badge/Android-10%2B-3ddc84?logo=android&logoColor=black)
+![ARM64](https://img.shields.io/badge/CPU-ARM64-444?logo=arm&logoColor=white)
+![MIT](https://img.shields.io/badge/License-MIT-blue)
 
-Download signed APKs from [GitHub Releases](https://github.com/P2GR/DJM-Rec-for-Android/releases).
+Requires Android 10+, a 64-bit ARM phone with USB host support, and a USB data cable.
+Install the **release APK**; the debug APK is for testing.
 
-## Mixer support
+</div>
 
-| Mixer | USB IDs | Status |
-|---|---|---|
-| DJM-A9 | `2B73:003C` | Hardware validated |
-| DJM-V5 | `2B73:0058` through `2B73:005B` | Driver-derived implementation, hardware test needed |
-| DJM-900NXS2 | `2B73:000A` | Driver-derived implementation, hardware test needed |
-| DJM-750MK2 | `2B73:001B` | Driver-derived implementation, hardware test needed |
+## Supported devices
 
-V5, 900NXS2, and 750MK2 profiles use each model's extracted vendor-control read format and
-MIX/REC OUT source values. Route changes are read, verified, and restored when capture stops.
-Unknown devices never receive Pioneer vendor routing requests.
+| Device | Support |
+| --- | --- |
+| **DJM-450, DJM-750MK2, DJM-900NXS2, DJM-A9, DJM-V10** | ✅ Supported |
+| DJM-V5, DJM-S11 | 🧪 Experimental |
+| XDJ-XZ, XDJ-AZ, OPUS-QUAD, OMNIS-DUO | 🧪 Experimental |
+| XDJ-RX3 | ⚠️ Not possible — USB audio is playback-only |
+| Other USB audio interfaces | May work with a compatible USB audio input |
 
-Installed Windows driver binaries were used only for interoperability research. They remain
-ignored and are not distributed by this repository.
+Use the mixer's **PC/Mac USB audio port** with a USB data cable. Experimental support is not a
+guarantee. On the XDJ-RX3, use MASTER REC to USB storage instead. Pro DJ Link and USB protocol
+research live on the separate
+[`experimental` branch](https://github.com/P2GR/DJM-Rec-for-Android/tree/experimental).
 
-DJM-A9 supports USB-C to USB-C or USB-B to USB-C. DJM-900NXS2 and DJM-750MK2 require
-USB-B to USB-C. Cable must support data and USB host/OTG mode.
+## Start recording
+
+1. Connect the mixer's **USB-B port** (the one you would normally plug into your laptop) to your
+   phone with a **USB-B to USB-C data cable**. The DJM-A9 is the exception: it has a **USB-C port
+   at the top**, so USB-C to USB-C works there. The **MULTI I/O USB port** used for
+   *DJM Rec for iPhone* does **not** work with this app.
+2. Open DJM Rec and allow USB access.
+3. Play audio and check both meters; automatic arming starts monitoring, not recording.
+4. Press **Record**, then **Save set** when finished. Files appear in **Sets** and `Music/DJMRec`.
+
+Format, gain and USB channel pair are in **Recording setup** (0 dB gain keeps the input level).
+Keep USB connected during a set: force-stop, reboot or cable loss ends capture.
 
 ## Features
 
-| Module | Description |
-|---|---|
-| USB recording | Capture multichannel UAC2 audio to WAV or FLAC |
-| Live monitoring | Stereo meters and optional CDJ-style RGB waveform |
-| Recording library | Browse, share, rename, and delete saved sets |
-| Diagnostics | Export USB descriptors, UAC topology, mixer profile, routes, and transfer health |
-| Updates | Check GitHub Releases without interrupting active recordings |
+<table>
+  <tr>
+    <td width="33%" valign="top"><h3>🎙️ Studio recording</h3><p>WAV, FLAC and MP3 (320 kbps) with pause/resume and an optional MP3 copy.</p></td>
+    <td width="33%" valign="top"><h3>🛡️ Safe capture</h3><p>-1 dBFS safety limiter, 15-second pre-record buffer, leading-silence trim and auto-stop.</p></td>
+    <td width="33%" valign="top"><h3>🌊 CDJ waveform</h3><p>3-band RGB waveform with stereo meters and clip warnings.</p></td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top"><h3>✂️ Set editor</h3><p>Trim, fades and loudness normalization (BS.1770 LUFS); export to MP3, WAV or FLAC.</p></td>
+    <td width="33%" valign="top"><h3>🔴 Livestream &amp; video</h3><p>YouTube, Mixcloud and RTMP streaming with local recording and MP4 video.</p></td>
+    <td width="33%" valign="top"><h3>📱 Long-set ready</h3><p>Background recording, persistent notification, set library, battery and heat warnings.</p></td>
+  </tr>
+</table>
 
-## Build
+## Privacy
 
-```bash
-./gradlew assembleDebug
-./gradlew assembleRelease
-./gradlew assembleLocal
-```
+Optional Firebase diagnostics (crash reports and bounded mixer-connection events) help improve
+mixer compatibility. No recorded audio, filenames or personal data is collected. Turn it off in
+**Settings > Diagnostics & privacy**.
 
-Requires JDK 17, NDK 26.1, CMake 3.22.1, and an ARM64 Android device with USB host support.
-Emulators cannot test physical USB audio capture.
+## ☕ Buy me a coffee
 
-Release builds require `keystore.properties`. They never fall back to debug signing.
-`assembleLocal` creates an installable test APK signed with the Android debug key. Never publish
-that APK.
+If DJM REC saved your set, you can support the project:
 
-## How it works
+<div align="center">
 
-| Layer | Implementation |
-|---|---|
-| USB transport | Root-free raw isochronous capture through `libusb_wrap_sys_device()` |
-| Mixer routing | Model profiles using verified Pioneer vendor controls |
-| Channel extraction | Native C++ demux of one stereo pair from multichannel PCM |
-| Audio engine | Raw USB path for supported mixers, AAudio fallback for generic stereo UAC devices |
-| Encoding | WAV and FLAC (libFLAC 1.4.3) |
-| Diagnostics | Structured USB/UAC/profile/session snapshot plus app logcat in release builds |
-| UI | Jetpack Compose, stereo meters, optional RGB waveform, format selector |
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-ffdd00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/p2gr)
 
-The `WaveformAnalyzer` uses a three-band IIR filter bank to render a scrolling
-CDJ-3000-style RGB waveform.
-
-## Releases
-
-`version.properties` is the single version source. Bump it on Windows with:
-
-```powershell
-.\scripts\bump-version.ps1 -Part patch
-# Or: .\scripts\bump-version.ps1 -Version 1.0.0
-```
-
-Pushes and pull requests run CI. A tag matching `VERSION_NAME` publishes a signed APK and
-SHA-256 checksum:
-
-```powershell
-git add version.properties
-git commit -m "chore: release v0.35.0"
-git tag v0.35.0
-git push origin main v0.35.0
-```
-
-Required GitHub Actions secrets:
-
-- `ANDROID_KEYSTORE_BASE64`
-- `ANDROID_STORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
-
-The installed app checks `P2GR/DJM-Rec-for-Android` GitHub Releases for newer versions.
-Update prompts wait until recording preparation, recording, or pause has ended.
+</div>
 
 ## License
 
-Licensed under the MIT License. Oboe, libFLAC, tinyalsa, and libusb retain their own licenses.
+MIT. Bundled libraries retain their own licenses.

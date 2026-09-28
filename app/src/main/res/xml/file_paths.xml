@@ -3,7 +3,6 @@
     <external-files-path name="logs" path="logs/" />
     <external-path name="public_recordings" path="Music/DJMRec/" />
     <external-files-path name="recordings" path="Music/DJMRec/" />
-    <external-files-path name="stream_test" path="stream_test/" />
     <cache-path name="logs_cache" path="logs/" />
-    <cache-path name="stream_test_cache" path="stream_test/" />
+    <cache-path name="updates" path="updates/" />
 </paths>

@@ -18,6 +18,7 @@ import androidx.core.content.getSystemService
 import com.audiopro.djmrec.MainActivity
 import com.audiopro.djmrec.R
 import com.audiopro.djmrec.library.RemoteLinkIndex
+import com.audiopro.djmrec.library.TracklistStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -156,17 +157,11 @@ class SoundCloudUploadService : Service() {
         }
     }
 
-    /** Prepends the recording's tracklist sidecar (written by RecordingService when "MARK" was
-     *  used during the take), if one exists next to the audio file, to the default description. */
+    /** Prepends the take's tracklist (from "MARK TRACK" during recording), if any, to the
+     *  default description. */
     private fun buildDescription(file: File): String {
         val baseDescription = SoundCloudUploadManager.getDefaultDescription(applicationContext)
-        val sidecar = File(file.parentFile, "${file.nameWithoutExtension}.tracklist.txt")
-        if (!sidecar.isFile) return baseDescription
-        val tracklist = try {
-            sidecar.readText()
-        } catch (e: Exception) {
-            return baseDescription
-        }
+        val tracklist = TracklistStore.read(applicationContext, file) ?: return baseDescription
         return "Tracklist:\n$tracklist\n\n$baseDescription"
     }
 

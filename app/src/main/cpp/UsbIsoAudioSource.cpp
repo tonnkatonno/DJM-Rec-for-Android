@@ -1,4 +1,6 @@
 #include "UsbIsoAudioSource.h"
+#include "UsbPcmFormat.h"
+#include "UsbSampleRate.h"
 
 #include <android/log.h>
 #include <libusb.h>
@@ -20,31 +22,6 @@ namespace djmrec {
 namespace {
 std::string libusbErrorString(const char* what, int code) {
     return std::string(what) + " failed: " + libusb_error_name(code);
-}
-
-int32_t decodeCanonicalSample(const uint8_t* sample, int subframeSize, int bitResolution) {
-    switch (subframeSize) {
-        case 1:
-            return static_cast<int32_t>(static_cast<int8_t>(sample[0])) << 24;
-        case 2: {
-            auto v = static_cast<int16_t>(sample[0] | (sample[1] << 8));
-            return static_cast<int32_t>(v) << 16;
-        }
-        case 3: {
-            int32_t v = sample[0] | (sample[1] << 8) | (sample[2] << 16);
-            if (v & 0x00800000) {
-                v |= static_cast<int32_t>(0xFF000000);
-            }
-            return v << 8;
-        }
-        case 4:
-        default: {
-            auto v = static_cast<int32_t>(
-                static_cast<uint32_t>(sample[0]) | (static_cast<uint32_t>(sample[1]) << 8) |
-                (static_cast<uint32_t>(sample[2]) << 16) | (static_cast<uint32_t>(sample[3]) << 24));
-            return (bitResolution > 0 && bitResolution <= 24) ? (v << 8) : v;
-        }
-    }
 }
 
 uint32_t sampleMagnitude(int32_t sample) {
@@ -82,7 +59,8 @@ struct IsoEndpointInfo {
 IsoEndpointInfo findIsoOutEndpoint(
     const std::vector<uint8_t>& descriptors,
     int targetInterface,
-    int targetAlternateSetting
+    int targetAlternateSetting,
+    int targetAddress = -1
 ) {
     int currentInterface = -1;
     int currentAlternateSetting = -1;
@@ -99,7 +77,7 @@ IsoEndpointInfo findIsoOutEndpoint(
                    currentAlternateSetting == targetAlternateSetting) {
             const int address = descriptors[offset + 2];
             const int attributes = descriptors[offset + 3];
-            if ((address & LIBUSB_ENDPOINT_IN) == 0 &&
+            if ((targetAddress >= 0 ? address == targetAddress : (address & LIBUSB_ENDPOINT_IN) == 0) &&
                 (attributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
                 const int rawMaxPacket = descriptors[offset + 4] | (descriptors[offset + 5] << 8);
                 const int transactions = 1 + ((rawMaxPacket >> 11) & 0x03);
@@ -122,7 +100,8 @@ bool readPioneerRouteSource(
     int& source
 ) {
     if (output < 0 || output >= profile.outputCount) return false;
-    uint8_t response[5]{};
+    if (profile.routeReadMode == PioneerRouteReadMode::None) return false;
+    uint8_t response[6]{};
     const bool allOutputs = profile.routeReadMode == PioneerRouteReadMode::AllOutputs;
     const uint16_t value = profile.routeReadMode == PioneerRouteReadMode::SingleOutputOneBased
         ? static_cast<uint16_t>(output + 1)
@@ -162,7 +141,7 @@ bool writePioneerRouteSource(
     return true;
 }
 
-bool setPioneerCaptureSampleRate(
+int setPioneerCaptureSampleRate(
     libusb_device_handle* handle,
     int endpointAddress,
     int sampleRate,
@@ -186,11 +165,11 @@ bool setPioneerCaptureSampleRate(
         LOGW("%s endpoint 0x%02x SET_CUR sampling frequency %d Hz unsupported: %s",
              profileName, endpointAddress, sampleRate,
              rc < 0 ? libusb_error_name(rc) : "short response");
-        return false;
+        return rc;
     }
     LOGI("%s endpoint 0x%02x initialized at %d Hz using Pioneer driver sequence",
          profileName, endpointAddress, sampleRate);
-    return true;
+    return rc;
 }
 
 int readPioneerEndpointSampleRate(
@@ -262,21 +241,6 @@ bool setClockFrequency(libusb_device_handle* handle, int interfaceNumber, int cl
     return true;
 }
 
-int normalizeSampleRate(int measuredRate) {
-    constexpr int kCommonRates[] = {8000, 11025, 12000, 16000, 22050, 24000, 32000,
-                                    44100, 48000, 88200, 96000, 176400, 192000};
-    int closest = measuredRate;
-    int closestDistance = INT_MAX;
-    for (const int candidate : kCommonRates) {
-        const int distance = std::abs(measuredRate - candidate);
-        if (distance < closestDistance) {
-            closest = candidate;
-            closestDistance = distance;
-        }
-    }
-    // Wall-clock probing is deliberately approximate. Snap only when a standard USB rate is close.
-    return closestDistance * 100 <= closest * 3 ? closest : measuredRate;
-}
 } // namespace
 
 UsbIsoAudioSource::~UsbIsoAudioSource() {
@@ -287,10 +251,23 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
     if (mRunning.load(std::memory_order_acquire)) {
         return "already running";
     }
+    mMixerProfile = findPioneerMixerProfile(config.vendorId, config.productId);
+    if (mMixerProfile && mMixerProfile->captureInChannels > 0 &&
+        (config.totalChannels != mMixerProfile->captureInChannels ||
+         config.subframeSize != mMixerProfile->captureInSubframeBytes ||
+         config.bitResolution != mMixerProfile->captureInBitResolution)) {
+        return std::string(mMixerProfile->name) +
+            " capture format mismatch between Kotlin and native profiles";
+    }
+    if (mMixerProfile && mMixerProfile->fixedCaptureInSampleRate > 0 &&
+        config.requestedSampleRate != mMixerProfile->fixedCaptureInSampleRate) {
+        return std::string(mMixerProfile->name) + " requires " +
+            std::to_string(mMixerProfile->fixedCaptureInSampleRate) + " Hz capture";
+    }
     if (config.fd < 0 || config.endpointAddress < 0 || config.maxPacketSize <= 0 ||
         config.totalChannels < 1 || config.subframeSize < 1 ||
         config.requestedSampleRate <= 0 ||
-        (config.extractChannelOffset >= 0 && config.extractChannelOffset + 2 > config.totalChannels)) {
+        (config.extractChannelOffset >= 0 && config.extractChannelOffset + std::min(2, config.totalChannels) > config.totalChannels)) {
         return "invalid capture configuration";
     }
 
@@ -299,10 +276,15 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
     mClaimedPlaybackInterface = -1;
     mPlaybackTransfers.clear();
     mPlaybackFrameRemainder = 0;
-    mMixerProfile = findPioneerMixerProfile(config.vendorId, config.productId);
     mPioneerFallbackStage = 0;
+    mEndpointRateSetResult = -999;
+    mDjm450RouteSetResult = -999;
+    mDjm450RouteValue = -1;
     mResolvedChannelOffset = config.extractChannelOffset;
     mFramesSincePeakLog = 0;
+    mLoggedPayloadWindow = false;
+    mLoggedPayloadSignal = false;
+    mChannelActivity.reset();
     mBytesSincePeakLog = 0;
     mNonZeroBytesSincePeakLog = 0;
     mRawPacketDumpsLogged = 0;
@@ -316,7 +298,10 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
     mResubmitFailures.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(mRateProbeMutex);
-        mRateProbeFrames = 0;
+        mRateProbeBytes = 0;
+        mRateProbePackets = 0;
+        mCapturePacketsPerSecond = 0;
+        mConfirmedClockRate = mMixerProfile ? mMixerProfile->fixedCaptureInSampleRate : 0;
         mRateProbeStarted = false;
         mRateProbeResolved = false;
     }
@@ -341,6 +326,14 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
         libusb_exit(mContext);
         mContext = nullptr;
         return libusbErrorString("libusb_wrap_sys_device", rc);
+    }
+
+    const auto captureEndpoint = findIsoOutEndpoint(config.rawDescriptors, config.interfaceNumber,
+        config.alternateSetting, config.endpointAddress);
+    const int captureSpeed = libusb_get_device_speed(libusb_get_device(mHandle));
+    if (captureEndpoint.address >= 0 && captureSpeed >= LIBUSB_SPEED_FULL) {
+        const int base = captureSpeed >= LIBUSB_SPEED_HIGH ? 8000 : 1000;
+        mCapturePacketsPerSecond = base >> std::clamp(captureEndpoint.interval - 1, 0, 15);
     }
 
     // Best-effort; harmless if unsupported (Android has no competing kernel audio-class driver
@@ -397,6 +390,7 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
             }
             if (activeRate > 0) {
                 mOpenedSampleRate.store(activeRate, std::memory_order_release);
+                mConfirmedClockRate = activeRate;
             }
             LOGI("Clock source %d active rate: %d Hz", config.clockSourceId,
                  mOpenedSampleRate.load(std::memory_order_acquire));
@@ -472,6 +466,16 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
         }
     }
 
+    if (!mMixerProfile && hasEndpointFrequencyControl(config.rawDescriptors, config.interfaceNumber,
+            config.alternateSetting, config.endpointAddress)) {
+        setPioneerCaptureSampleRate(mHandle, config.endpointAddress, config.requestedSampleRate, "USB Audio Class 1");
+        const int endpointRate = readPioneerEndpointSampleRate(mHandle, config.endpointAddress, "USB Audio Class 1");
+        if (endpointRate > 0) {
+            mOpenedSampleRate.store(endpointRate, std::memory_order_release);
+            mConfirmedClockRate = endpointRate;
+        }
+    }
+
     if (mMixerProfile && mMixerProfile->usesEndpointSampleRate) {
         // A USBPcap capture of Pioneer's own driver actually recording real audio (2026-07-20,
         // whit_sound_on.pcapng) showed it never sends a GET_CUR probe here at all: right after
@@ -484,19 +488,52 @@ std::string UsbIsoAudioSource::start(const Config& config, FrameCallback callbac
         // that GET result may not reflect whether the endpoint is actually armed, so gating the
         // SET on it could have been silently skipping the one command that arms real streaming.
         // Always SET now, unconditionally, matching the proven-working driver sequence.
-        setPioneerCaptureSampleRate(
+        mEndpointRateSetResult = setPioneerCaptureSampleRate(
             mHandle, config.endpointAddress, config.requestedSampleRate, mMixerProfile->name);
         const int endpointRate = readPioneerEndpointSampleRate(
             mHandle, config.endpointAddress, mMixerProfile->name);
         if (endpointRate > 0) {
             mOpenedSampleRate.store(endpointRate, std::memory_order_release);
+            // Vendor endpoint GET may echo a requested rate; packet timing verifies the wire.
             LOGI("%s capture endpoint reports active rate %d Hz", mMixerProfile->name, endpointRate);
         }
-        if (mMixerProfile->requiresPlaybackTraffic &&
-            !startPioneerPlaybackSilence(mOpenedSampleRate.load(std::memory_order_acquire))) {
-            LOGW("%s could not start playback traffic; continuing capture-only", mMixerProfile->name);
+    }
+
+    if (mMixerProfile == &kDjm450Profile) {
+        // The DJM-450 has a documented SET mapping but no established route GET. Apply the
+        // selected MIX route once, after interface/rate setup and before any transfers run.
+        // Do not invent readback/restore semantics or block the USB event thread with retries.
+        const int value = pioneerMixRouteValue(*mMixerProfile, config.extractChannelOffset);
+        mDjm450RouteValue = value;
+        if (value >= 0) {
+            const int result = libusb_control_transfer(
+                mHandle, LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+                0x03, static_cast<uint16_t>(value), kPioneerRouteIndex, nullptr, 0, 1000);
+            mDjm450RouteSetResult = result;
+            LOGI("DJM-450 MIX route SET value=0x%04x result=%d; rate SET result=%d",
+                 value, result, mEndpointRateSetResult.load());
+            if (result != 0) {
+                const auto error = libusbErrorString("DJM-450 MIX/REC OUT route SET", result);
+                stop();
+                return error;
+            }
+            std::lock_guard<std::mutex> lock(mDiagnosticMutex);
+            mPioneerAppliedSources[(value >> 8) - 1] = value & 0xff;
         }
     }
+
+    // Some UAC2 Pioneer models (notably DJM-S11) derive the capture clock from the active
+    // playback stream but do not use the UAC1 endpoint-rate request above. Keep their OUT
+    // traffic alive independently of the endpoint-rate initialization path.
+    if (mMixerProfile && mMixerProfile->requiresPlaybackTraffic && mPlaybackTransfers.empty() &&
+        !startPioneerPlaybackSilence(mOpenedSampleRate.load(std::memory_order_acquire))) {
+        if (mMixerProfile == &kDjm450Profile) {
+            stop();
+            return "DJM-450 playback keepalive could not be initialized";
+        }
+        LOGW("%s could not start playback traffic; continuing capture-only", mMixerProfile->name);
+    }
+    if (mMixerProfile == &kDjm450Profile) mPioneerFallbackStage = 0;
 
     const std::string channelDescription = config.extractChannelOffset < 0
         ? "auto stereo pair"
@@ -573,7 +610,7 @@ bool UsbIsoAudioSource::startPioneerPlaybackSilence(int sampleRate) {
     const int intervalShift = std::clamp(endpoint.interval - 1, 0, 10);
     mPlaybackPacketsPerSecond = std::max(1, basePacketsPerSecond >> intervalShift);
     mPlaybackFrameBytes =
-        mMixerProfile->playbackChannels * mMixerProfile->playbackSubframeBytes;
+        mMixerProfile->playbackOutChannels * mMixerProfile->playbackOutSubframeBytes;
     mPlaybackMaxPacketSize = endpoint.maxPacketSize;
     mPlaybackFrameRemainder = 0;
 
@@ -591,7 +628,7 @@ bool UsbIsoAudioSource::startPioneerPlaybackSilence(int sampleRate) {
     mPioneerFallbackStage = 1;
     LOGI("%s fallback strategy 1: streaming silence to endpoint 0x%02x at %d Hz "
          "(%dch packed 24-bit, %d packets/sec, maxPacket=%d)",
-         mMixerProfile->name, endpoint.address, sampleRate, mMixerProfile->playbackChannels,
+         mMixerProfile->name, endpoint.address, sampleRate, mMixerProfile->playbackOutChannels,
          mPlaybackPacketsPerSecond, mPlaybackMaxPacketSize);
     return true;
 }
@@ -693,6 +730,7 @@ void UsbIsoAudioSource::handleCompletedTransfer(libusb_transfer* transfer) {
             continue;
         }
         mPacketsCompleted.fetch_add(1, std::memory_order_relaxed);
+        updateMeasuredSampleRate(packet.actual_length);
         if (packet.actual_length == 0) {
             mPacketsEmpty.fetch_add(1, std::memory_order_relaxed);
             continue;
@@ -728,9 +766,9 @@ UsbIsoAudioSource::TransferStatsSnapshot UsbIsoAudioSource::getTransferStats() c
 
 std::string UsbIsoAudioSource::diagnosticSummary() const {
     const auto stats = getTransferStats();
-    std::array<int, 5> original{};
-    std::array<int, 5> applied{};
-    std::array<bool, 5> changed{};
+    std::array<int, 6> original{};
+    std::array<int, 6> applied{};
+    std::array<bool, 6> changed{};
     {
         std::lock_guard<std::mutex> lock(mDiagnosticMutex);
         original = mPioneerOriginalSources;
@@ -762,6 +800,13 @@ std::string UsbIsoAudioSource::diagnosticSummary() const {
         << " transfers:" << mPlaybackTransfers.size() << '\n'
         << "route_fallback_stage=" << mPioneerFallbackStage.load(std::memory_order_relaxed) << '\n';
 
+    if (mMixerProfile == &kDjm450Profile) {
+        out << "capture_setup=rate_set_result:" << mEndpointRateSetResult.load()
+            << " route_value:" << mDjm450RouteValue.load()
+            << " route_set_result:" << mDjm450RouteSetResult.load()
+            << " route_readback:unsupported\n";
+    }
+
     if (mMixerProfile) {
         for (int output = 0; output < mMixerProfile->outputCount; ++output) {
             out << "route_output_" << (output + 1)
@@ -777,6 +822,7 @@ std::string UsbIsoAudioSource::diagnosticSummary() const {
         << " bytes:" << stats.bytesReceived
         << " nonzero_bytes:" << stats.nonZeroBytesReceived
         << " resubmit_failures:" << stats.resubmitFailures;
+    out << '\n' << mChannelActivity.summary(mConfig.totalChannels);
     return out.str();
 }
 
@@ -789,18 +835,24 @@ void UsbIsoAudioSource::configurePioneerRecordingRoute() {
     }
     if (!mHandle || !mMixerProfile) return;
 
+    // Write-only DJM-450 setup runs once after SET_INTERFACE and sample-rate initialization.
+    if (mMixerProfile == &kDjm450Profile) return;
+
     int output = mMixerProfile->defaultOutput;
     if (mConfig.extractChannelOffset >= 0) {
         const int requestedOutput = mConfig.extractChannelOffset / 2;
         if (requestedOutput < mMixerProfile->outputCount) {
             output = requestedOutput;
         } else {
-            mResolvedChannelOffset.store(mMixerProfile->defaultOutput * 2, std::memory_order_relaxed);
-            const int resolvedOffset = mResolvedChannelOffset.load(std::memory_order_relaxed);
-            LOGW("%s does not expose configurable USB output %d; using output %d/channels %d-%d",
-                 mMixerProfile->name, requestedOutput + 1, mMixerProfile->defaultOutput + 1,
-                 resolvedOffset + 1, resolvedOffset + 2);
+            // A valid wire pair may be fixed rather than vendor-configurable.
+            // Honor explicit selection instead of silently recording another pair.
+            LOGI("%s USB output %d uses its existing fixed route",
+                 mMixerProfile->name, requestedOutput + 1);
+            return;
         }
+    } else if (mMixerProfile == &kDjmS11Profile) {
+        // Never auto-select a deck input instead of S11's dedicated REC OUT pair.
+        mResolvedChannelOffset.store(mMixerProfile->defaultOutput * 2, std::memory_order_relaxed);
     }
     routePioneerOutputToMix(output);
     mPioneerFallbackStage = 1;
@@ -884,35 +936,37 @@ int UsbIsoAudioSource::waitForMeasuredSampleRate(int timeoutMs) {
     mRateProbeReady.wait_for(lock, std::chrono::milliseconds(std::max(0, timeoutMs)), [this] {
         return mRateProbeResolved || !mRunning.load(std::memory_order_acquire);
     });
+    if (!mRunning.load(std::memory_order_acquire)) return 0;
+    if (!mRateProbeResolved) {
+        mOpenedSampleRate.store(mConfirmedClockRate, std::memory_order_release);
+        mRateProbeResolved = true;
+    }
     return mOpenedSampleRate.load(std::memory_order_acquire);
 }
 
-void UsbIsoAudioSource::updateMeasuredSampleRate(size_t frameCount) {
+void UsbIsoAudioSource::updateMeasuredSampleRate(size_t payloadBytes) {
+    if (mRateProbeResolved.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lock(mRateProbeMutex);
-    if (mRateProbeResolved) {
-        return;
-    }
-
+    if (mRateProbeResolved) return;
     const auto now = std::chrono::steady_clock::now();
     if (!mRateProbeStarted) {
         mRateProbeStart = now;
         mRateProbeStarted = true;
+        return; // The first packet's time interval started before the observation.
     }
-    mRateProbeFrames += frameCount;
-
-    const auto elapsed = std::chrono::duration<double>(now - mRateProbeStart).count();
-    if (elapsed < 0.25) {
-        return;
-    }
-
-    const int measuredRate = static_cast<int>(std::lround(mRateProbeFrames / elapsed));
-    if (measuredRate > 0) {
-        const int normalizedRate = normalizeSampleRate(measuredRate);
-        mOpenedSampleRate.store(normalizedRate, std::memory_order_release);
-        LOGI("Measured USB wire rate: %d Hz (raw=%d Hz, requested=%d Hz)",
-             normalizedRate, measuredRate, mConfig.requestedSampleRate);
-    }
-    mRateProbeResolved = true;
+    mRateProbeBytes += payloadBytes;
+    ++mRateProbePackets;
+    const double elapsed = std::chrono::duration<double>(now - mRateProbeStart).count();
+    if (mCapturePacketsPerSecond > 0 ? mRateProbePackets < mCapturePacketsPerSecond / 2 : elapsed < 1.0) return;
+    const uint64_t frames = mRateProbeBytes / (mConfig.subframeSize * mConfig.totalChannels);
+    const int rawWallRate = elapsed > 0 ? static_cast<int>(std::lround(frames / elapsed)) : 0;
+    const int packetRate = usbPacketSampleRate(frames, mRateProbePackets, mCapturePacketsPerSecond);
+    const int resolved = mConfirmedClockRate > 0 ? mConfirmedClockRate :
+        mCapturePacketsPerSecond > 0 ? packetRate : nominalUsbSampleRate(rawWallRate);
+    mOpenedSampleRate.store(resolved, std::memory_order_release);
+    LOGI("USB rate resolved=%d Hz; packet_rate=%d Hz; wall_estimate=%d Hz; confirmed_clock=%d Hz; packets_per_second=%d",
+        resolved, packetRate, rawWallRate, mConfirmedClockRate, mCapturePacketsPerSecond);
+    mRateProbeResolved.store(true, std::memory_order_release);
     mRateProbeReady.notify_all();
 }
 
@@ -965,22 +1019,15 @@ void UsbIsoAudioSource::demuxAndEmit(const uint8_t* data, size_t length) {
     const size_t consumedBytes = completeFrames * frameSize;
 
     if (completeFrames > 0) {
-        updateMeasuredSampleRate(completeFrames);
         if (mScratch.size() < completeFrames * 2) {
             mScratch.resize(completeFrames * 2);
         }
 
         const int subframe = mConfig.subframeSize;
+        mChannelActivity.observe(mWorking.data(), completeFrames, mConfig.totalChannels, subframe,
+            mMixerProfile && mConfig.bitResolution <= 24);
         for (int offset = 0; offset + 1 < mConfig.totalChannels; offset += 2) {
-            uint32_t pairMagnitude = 0;
-            const int offsetBytes = offset * subframe;
-            for (size_t f = 0; f < completeFrames; ++f) {
-                const uint8_t* frameBase = mWorking.data() + f * frameSize + offsetBytes;
-                const int32_t left = decodeCanonicalSample(frameBase, subframe, mConfig.bitResolution);
-                const int32_t right = decodeCanonicalSample(frameBase + subframe, subframe, mConfig.bitResolution);
-                pairMagnitude = std::max(pairMagnitude, sampleMagnitude(left));
-                pairMagnitude = std::max(pairMagnitude, sampleMagnitude(right));
-            }
+            const auto pairMagnitude = std::max(mChannelActivity.peak(offset), mChannelActivity.peak(offset + 1));
             const size_t pairIndex = static_cast<size_t>(offset / 2);
             if (pairIndex < mPairPeaks.size()) {
                 mPairPeaks[pairIndex] = std::max(mPairPeaks[pairIndex], pairMagnitude);
@@ -994,8 +1041,8 @@ void UsbIsoAudioSource::demuxAndEmit(const uint8_t* data, size_t length) {
         for (size_t f = 0; f < completeFrames; ++f) {
             const uint8_t* frameBase = mWorking.data() + f * frameSize + offsetBytes;
             for (int ch = 0; ch < 2; ++ch) {
-                const uint8_t* s = frameBase + static_cast<size_t>(ch) * subframe;
-                mScratch[f * 2 + ch] = decodeCanonicalSample(s, subframe, mConfig.bitResolution);
+                const uint8_t* s = frameBase + static_cast<size_t>(mConfig.totalChannels == 1 ? 0 : ch) * subframe;
+                mScratch[f * 2 + ch] = decodeUsbPcm(s, subframe, mMixerProfile && mConfig.bitResolution <= 24);
             }
         }
 
@@ -1006,10 +1053,16 @@ void UsbIsoAudioSource::demuxAndEmit(const uint8_t* data, size_t length) {
         mFramesSincePeakLog += completeFrames;
         if (mFramesSincePeakLog >= static_cast<size_t>(
                 std::max(1, mOpenedSampleRate.load(std::memory_order_acquire)))) {
-            LOGI("USB raw payload nonzero bytes=%llu/%llu; decoded pair peaks: %s; selected ch %d-%d",
-                 static_cast<unsigned long long>(mNonZeroBytesSincePeakLog),
-                 static_cast<unsigned long long>(mBytesSincePeakLog),
-                 peakSummary(mPairPeaks).c_str(), selectedOffset + 1, selectedOffset + 2);
+            // Inventory once, then first signal if capture initially started silent.
+            // Peak windows still update every second for routing and diagnostics.
+            if (!mLoggedPayloadWindow || (!mLoggedPayloadSignal && mNonZeroBytesSincePeakLog > 0)) {
+                LOGI("USB raw payload nonzero bytes=%llu/%llu; decoded pair peaks: %s; selected ch %d-%d",
+                     static_cast<unsigned long long>(mNonZeroBytesSincePeakLog),
+                     static_cast<unsigned long long>(mBytesSincePeakLog),
+                     peakSummary(mPairPeaks).c_str(), selectedOffset + 1, selectedOffset + 2);
+                mLoggedPayloadWindow = true;
+                mLoggedPayloadSignal = mNonZeroBytesSincePeakLog > 0;
+            }
             if (mMixerProfile) {
                 const int fallbackStage = mPioneerFallbackStage.load(std::memory_order_relaxed);
                 // mNonZeroBytesReceived is cumulative for the whole session -- a single stray
@@ -1041,9 +1094,9 @@ void UsbIsoAudioSource::demuxAndEmit(const uint8_t* data, size_t length) {
                 // that exact instant kept leapfrogging, flipping the selected pair dozens of times
                 // per second. That mid-recording channel-switching is what produced the reported
                 // quiet/distorted output: FLAC frames interleaved from different pairs mid-stream.
-                // Deciding once per finished window, against the now-final peaks, removes the
-                // in-progress-data race. A margin (not just ">") on top avoids flapping between
-                // two pairs that are close but not equal from one window to the next.
+                // Wait for one finished window containing audible signal, then lock that pair for
+                // the lifetime of this capture. Re-selecting later can splice unrelated routed
+                // outputs into one recording even when the comparison itself is race-free.
                 uint32_t bestMagnitude = 0;
                 int bestOffset = 0;
                 for (size_t pairIndex = 0; pairIndex < mPairPeaks.size(); ++pairIndex) {
@@ -1056,21 +1109,14 @@ void UsbIsoAudioSource::demuxAndEmit(const uint8_t* data, size_t length) {
 
                 constexpr uint32_t kAudibleThreshold = 1u << 20;
                 const int currentOffset = mResolvedChannelOffset.load(std::memory_order_relaxed);
-                if (currentOffset < 0) {
+                if (currentOffset < 0 && bestMagnitude >= kAudibleThreshold) {
                     mResolvedChannelOffset.store(bestOffset, std::memory_order_relaxed);
-                } else if (bestOffset != currentOffset && bestMagnitude >= kAudibleThreshold) {
-                    const size_t currentPairIndex = static_cast<size_t>(currentOffset / 2);
-                    const uint32_t currentMagnitude = currentPairIndex < mPairPeaks.size()
-                        ? mPairPeaks[currentPairIndex] : 0;
-                    // Require a clear (25%) lead over the currently-selected pair, not just a
-                    // higher number, so two pairs that are merely close don't swap every window.
-                    if (bestMagnitude > currentMagnitude + currentMagnitude / 4) {
-                        mResolvedChannelOffset.store(bestOffset, std::memory_order_relaxed);
-                        LOGI("Auto-selected USB channels %d-%d for active audio", bestOffset + 1, bestOffset + 2);
-                    }
+                    LOGI("Locked AUTO capture to USB channels %d-%d for this session",
+                         bestOffset + 1, bestOffset + 2);
                 }
             }
             std::fill(mPairPeaks.begin(), mPairPeaks.end(), 0);
+            mChannelActivity.publish();
             mFramesSincePeakLog = 0;
             mBytesSincePeakLog = 0;
             mNonZeroBytesSincePeakLog = 0;

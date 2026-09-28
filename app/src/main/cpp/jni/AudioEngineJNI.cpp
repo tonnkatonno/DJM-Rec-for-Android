@@ -20,6 +20,13 @@ std::string jstringToStdString(JNIEnv* env, jstring jStr) {
 
 extern "C" {
 
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setRecordingGainDb(
+    JNIEnv*, jobject, jint gainDb) {
+    UsbAudioEngine::instance().setRecordingGainDb(gainDb);
+}
+
+
 JNIEXPORT jint JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_open(
     JNIEnv* /*env*/, jobject /*thiz*/,
@@ -68,20 +75,6 @@ Java_com_audiopro_djmrec_audio_AudioEngine_openUsbIso(
     return UsbAudioEngine::instance().openUsbIso(config, sampleRateHint);
 }
 
-JNIEXPORT jint JNICALL
-Java_com_audiopro_djmrec_audio_AudioEngine_openRootAlsa(
-    JNIEnv* /*env*/, jobject /*thiz*/,
-    jint card, jint device, jint sampleRate, jint channels, jint bitDepth, jint extractChannelOffset) {
-    djmrec::AlsaPcmAudioSource::Config config;
-    config.card = card;
-    config.device = device;
-    config.sampleRate = sampleRate;
-    config.channels = channels;
-    config.bitDepth = bitDepth;
-    config.extractChannelOffset = extractChannelOffset;
-    return UsbAudioEngine::instance().openRootAlsa(config);
-}
-
 JNIEXPORT jboolean JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_startRecording(
     JNIEnv* env, jobject /*thiz*/,
@@ -89,6 +82,61 @@ Java_com_audiopro_djmrec_audio_AudioEngine_startRecording(
     const std::string path = jstringToStdString(env, outputPath);
     const auto container = static_cast<ContainerFormat>(format);
     return UsbAudioEngine::instance().startRecording(path, container) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_startRecordingFd(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint fd, jint format) {
+    return UsbAudioEngine::instance().startRecordingFd(
+        fd, static_cast<ContainerFormat>(format)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_rollRecordingFd(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint fd, jint format) {
+    return UsbAudioEngine::instance().rollRecordingFd(
+        fd, static_cast<ContainerFormat>(format)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_checkpointRecording(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return static_cast<jlong>(UsbAudioEngine::instance().checkpointRecording());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_getRecordingErrorCode(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().getRecordingErrorCode();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_isStreamOpen(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().isStreamOpen() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_startLivePcm(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().startLivePcm() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_stopLivePcm(JNIEnv* /*env*/, jobject /*thiz*/) {
+    UsbAudioEngine::instance().stopLivePcm();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_readLivePcm16(
+    JNIEnv* env, jobject /*thiz*/, jbyteArray destination) {
+    if (!destination) return 0;
+    const jsize capacity = env->GetArrayLength(destination);
+    if (capacity <= 0) return 0;
+    static thread_local std::vector<uint8_t> buffer;
+    if (buffer.size() < static_cast<size_t>(capacity)) buffer.resize(capacity);
+    const size_t read = UsbAudioEngine::instance().readLivePcm16(buffer.data(), capacity);
+    if (read > 0) {
+        env->SetByteArrayRegion(
+            destination, 0, static_cast<jsize>(read), reinterpret_cast<const jbyte*>(buffer.data()));
+    }
+    return static_cast<jint>(read);
 }
 
 JNIEXPORT void JNICALL
@@ -136,11 +184,6 @@ Java_com_audiopro_djmrec_audio_AudioEngine_getXRunCount(JNIEnv* /*env*/, jobject
     return UsbAudioEngine::instance().getXRunCount();
 }
 
-JNIEXPORT jint JNICALL
-Java_com_audiopro_djmrec_audio_AudioEngine_getCurrentSampleRate(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return UsbAudioEngine::instance().getCurrentSampleRate();
-}
-
 JNIEXPORT jlongArray JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_getUsbIsoTransferStats(JNIEnv* env, jobject /*thiz*/) {
     uint64_t stats[7]{};
@@ -162,7 +205,7 @@ Java_com_audiopro_djmrec_audio_AudioEngine_getDiagnosticSummary(JNIEnv* env, job
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_getWaveformBins(JNIEnv* env, jobject /*thiz*/) {
-    constexpr int kFloats = UsbAudioEngine::kWaveformBinCount * 4;
+    constexpr int kFloats = UsbAudioEngine::kWaveformBinCount * 4 + 2;
     float bins[kFloats];
     UsbAudioEngine::instance().getWaveformBins(bins);
 
@@ -178,33 +221,58 @@ Java_com_audiopro_djmrec_audio_AudioEngine_setWaveformEnabled(
 }
 
 JNIEXPORT void JNICALL
-Java_com_audiopro_djmrec_audio_AudioEngine_setGainDb(
-    JNIEnv* /*env*/, jobject /*thiz*/, jfloat db) {
-    UsbAudioEngine::instance().setGainDb(db);
+Java_com_audiopro_djmrec_audio_AudioEngine_setTrimLeadingSilence(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    UsbAudioEngine::instance().setTrimLeadingSilence(enabled == JNI_TRUE);
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_isAwaitingAudio(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().isAwaitingAudio() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setLimiterEnabled(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    UsbAudioEngine::instance().setLimiterEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_takeLimiterReductionDb(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().takeLimiterReductionDb();
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_setPreRecordEnabled(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    UsbAudioEngine::instance().setPreRecordEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_getTrailingSilenceMillis(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return static_cast<jlong>(UsbAudioEngine::instance().getTrailingSilenceMillis());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_prepareCompanionFd(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint fd, jint format) {
+    return UsbAudioEngine::instance().prepareCompanionFd(fd, static_cast<ContainerFormat>(format))
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_clearPendingCompanion(JNIEnv* /*env*/, jobject /*thiz*/) {
+    UsbAudioEngine::instance().clearPendingCompanion();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_audiopro_djmrec_audio_AudioEngine_getCompanionErrorCode(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return UsbAudioEngine::instance().getCompanionErrorCode();
+}
 JNIEXPORT void JNICALL
 Java_com_audiopro_djmrec_audio_AudioEngine_setMonitoringEnabled(
     JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
     UsbAudioEngine::instance().setMonitoringEnabled(enabled == JNI_TRUE);
 }
 
-JNIEXPORT void JNICALL
-Java_com_audiopro_djmrec_audio_AudioEngine_setStreamingEnabled(
-    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
-    UsbAudioEngine::instance().setStreamingEnabled(enabled == JNI_TRUE);
-}
-
-JNIEXPORT jshortArray JNICALL
-Java_com_audiopro_djmrec_audio_AudioEngine_pullStreamPcm16(
-    JNIEnv* env, jobject /*thiz*/, jint maxFrames) {
-    std::vector<int16_t> buffer(static_cast<size_t>(maxFrames) * 2);
-    const size_t framesRead =
-        UsbAudioEngine::instance().pullStreamPcm16(buffer.data(), static_cast<size_t>(maxFrames));
-    if (framesRead == 0) return nullptr;
-    const auto sampleCount = static_cast<jsize>(framesRead * 2);
-    jshortArray result = env->NewShortArray(sampleCount);
-    env->SetShortArrayRegion(result, 0, sampleCount, buffer.data());
-    return result;
-}
 } // extern "C"

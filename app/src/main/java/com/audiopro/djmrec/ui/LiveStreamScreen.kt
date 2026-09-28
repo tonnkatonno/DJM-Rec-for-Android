@@ -1,0 +1,939 @@
+package com.audiopro.djmrec.ui
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
+import android.net.Uri
+import android.os.Build
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import com.audiopro.djmrec.BuildConfig
+import com.audiopro.djmrec.audio.RecordingState
+import com.audiopro.djmrec.streaming.LivePlatform
+import com.audiopro.djmrec.streaming.LiveStreamConfig
+import com.audiopro.djmrec.streaming.LiveStreamQuality
+import com.audiopro.djmrec.streaming.LiveStreamState
+import com.audiopro.djmrec.streaming.LiveStreamStatus
+import com.audiopro.djmrec.streaming.LiveVideoMode
+import com.audiopro.djmrec.streaming.StreamSetupStatus
+import com.audiopro.djmrec.streaming.StreamingSetupRepository
+import com.audiopro.djmrec.streaming.VideoRecordingPolicy
+import com.audiopro.djmrec.streaming.YouTubePrivacy
+import com.audiopro.djmrec.streaming.YouTubeBroadcastStatus
+import com.audiopro.djmrec.ui.theme.AccentAmber
+import com.audiopro.djmrec.ui.theme.AccentGreen
+import com.audiopro.djmrec.ui.theme.AccentRed
+import com.audiopro.djmrec.ui.theme.DjmRecMotion
+import com.audiopro.djmrec.ui.theme.rememberReducedMotion
+import com.google.android.gms.auth.api.identity.AuthorizationClient
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.Scope
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+
+@Composable
+fun LiveStreamScreen(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val recordingState by viewModel.recordingState.collectAsState()
+    val liveState by viewModel.liveStreamState.collectAsState()
+    val setupState by viewModel.streamSetupState.collectAsState()
+    val youtubeBroadcast by viewModel.youtubeBroadcastState.collectAsState()
+    var platform by rememberSaveable { mutableStateOf(LivePlatform.YOUTUBE) }
+    var serverUrl by rememberSaveable { mutableStateOf(LivePlatform.YOUTUBE.defaultServerUrl) }
+    var streamKey by viewModel.liveStreamKey
+    var videoMode by rememberSaveable { mutableStateOf(LiveVideoMode.BACK_CAMERA) }
+    var step by rememberSaveable { mutableStateOf(0) }
+    var confirmEnd by remember { mutableStateOf(false) }
+    var authorizing by remember { mutableStateOf(false) }
+    // Stream shape follows how the phone is held when the user goes live. The encoder keeps that
+    // orientation for the whole broadcast; on-screen controls rotate with the device.
+    val streamPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
+    val orientationLabel = if (streamPortrait) "Portrait (9:16)" else "Landscape (16:9)"
+    val artworkPreferences = remember(context) {
+        context.getSharedPreferences("livestream", Context.MODE_PRIVATE)
+    }
+    var artworkUri by rememberSaveable {
+        mutableStateOf(artworkPreferences.getString("custom_artwork_uri", null))
+    }
+    var localError by remember { mutableStateOf<String?>(null) }
+    var pendingCameraConfig by remember { mutableStateOf<LiveStreamConfig?>(null) }
+    var youtubeTitle by rememberSaveable {
+        mutableStateOf("DJ Set ${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}")
+    }
+    var youtubePrivacy by rememberSaveable { mutableStateOf(YouTubePrivacy.UNLISTED) }
+    var destinationUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var openedVerificationUrl by remember { mutableStateOf<String?>(null) }
+    // A lossless local copy is the only safe copy of a streamed set, so it is on by default.
+    var alsoRecordAudio by rememberSaveable { mutableStateOf(true) }
+    var saveVideo by rememberSaveable { mutableStateOf(false) }
+
+    fun openUrl(url: String) {
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            .onFailure { localError = "No browser is available" }
+    }
+
+    fun shareBroadcast(url: String) {
+        val share = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, youtubeTitle)
+            putExtra(Intent.EXTRA_TEXT, "Watch my DJ set live: $url")
+        }
+        runCatching { context.startActivity(Intent.createChooser(share, "Share broadcast")) }
+            .onFailure { localError = "No sharing app is available" }
+    }
+
+    fun acceptYouTubeToken(token: String?) {
+        authorizing = false
+        if (token.isNullOrBlank()) {
+            viewModel.setStreamSetupError(LivePlatform.YOUTUBE, "Google did not return an access token")
+        } else {
+            viewModel.prepareYouTubeDestination(token, youtubeTitle, youtubePrivacy)
+        }
+    }
+
+    val googleAuthorizationClient = remember(context) { Identity.getAuthorizationClient(context) }
+    // Keeps YouTube API calls (viewer stats, broadcast finalization) working on long sets, where
+    // the access token captured at connect time has already expired.
+    LaunchedEffect(Unit) {
+        StreamingSetupRepository.accessTokenRefresher = { silentYouTubeToken(googleAuthorizationClient) }
+    }
+    val googleAuthorization = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        try {
+            acceptYouTubeToken(
+                googleAuthorizationClient.getAuthorizationResultFromIntent(result.data).accessToken
+            )
+        } catch (error: ApiException) {
+            authorizing = false
+            viewModel.setStreamSetupError(
+                LivePlatform.YOUTUBE,
+                googleAuthorizationError(context, error)
+            )
+        }
+    }
+
+    fun connectYouTube() {
+        val activity = context as? Activity
+        if (activity == null) {
+            viewModel.setStreamSetupError(LivePlatform.YOUTUBE, "YouTube authorization is unavailable")
+            return
+        }
+        val request = AuthorizationRequest.builder()
+            .setRequestedScopes(listOf(Scope("https://www.googleapis.com/auth/youtube.force-ssl")))
+            .build()
+        authorizing = true
+        Identity.getAuthorizationClient(activity).authorize(request)
+            .addOnSuccessListener { result ->
+                if (result.hasResolution()) {
+                    val pendingIntent = result.pendingIntent
+                    if (pendingIntent != null) {
+                        googleAuthorization.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                    } else {
+                        authorizing = false
+                        viewModel.setStreamSetupError(LivePlatform.YOUTUBE, "Google could not open sign-in. Try again.")
+                    }
+                } else {
+                    acceptYouTubeToken(result.accessToken)
+                }
+            }
+            .addOnFailureListener { error ->
+                authorizing = false
+                viewModel.setStreamSetupError(
+                    LivePlatform.YOUTUBE,
+                    if (error is ApiException) googleAuthorizationError(context, error)
+                    else error.localizedMessage ?: "Google authorization failed"
+                )
+            }
+    }
+
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val config = pendingCameraConfig
+        pendingCameraConfig = null
+        if (granted && config != null) {
+            viewModel.startLiveStream(config)
+        } else if (!granted) {
+            localError = "Camera permission was denied. Choose Custom artwork or allow Camera."
+        }
+    }
+
+    val artworkPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            artworkUri?.takeIf { it != uri.toString() }?.let { previous ->
+                runCatching {
+                    context.contentResolver.releasePersistableUriPermission(
+                        Uri.parse(previous),
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            artworkUri = uri.toString()
+            artworkPreferences.edit().putString("custom_artwork_uri", uri.toString()).apply()
+            localError = null
+        }
+    }
+
+    val captureReady = recordingState is RecordingState.Monitoring ||
+        recordingState is RecordingState.Recording || recordingState is RecordingState.Paused
+
+    LaunchedEffect(platform) {
+        viewModel.cancelStreamSetup()
+        destinationUrl = null
+        openedVerificationUrl = null
+    }
+
+    LaunchedEffect(setupState.credentials) {
+        val credentials = setupState.credentials ?: return@LaunchedEffect
+        if (credentials.platform == platform) {
+            serverUrl = credentials.serverUrl
+            streamKey = credentials.streamKey
+            destinationUrl = credentials.destinationUrl
+            localError = null
+            viewModel.consumeStreamCredentials()
+            step = 1
+        }
+    }
+
+    LaunchedEffect(setupState.verificationUrl) {
+        val url = setupState.verificationUrl ?: return@LaunchedEffect
+        if (openedVerificationUrl != url) {
+            openedVerificationUrl = url
+            openUrl(url)
+        }
+    }
+
+    if (liveState.isActive && liveState.usesCamera && viewModel.cameraConsoleOpen.value) {
+        CameraLiveScreen(viewModel)
+        return
+    }
+
+    LaunchedEffect(youtubeBroadcast.status) {
+        if (platform == LivePlatform.YOUTUBE && youtubeBroadcast.status == YouTubeBroadcastStatus.COMPLETE) {
+            streamKey = ""
+            destinationUrl = null
+            step = 0
+        }
+    }
+
+    val localOnly = platform == LivePlatform.LOCAL
+    val destinationReady = localOnly || runCatching {
+        LiveStreamConfig(platform, serverUrl, streamKey, videoMode, streamPortrait).endpoint()
+    }.isSuccess
+    val videoWillSave = localOnly || (saveVideo && videoMode != LiveVideoMode.ARTWORK)
+    val pictureReady = videoMode != LiveVideoMode.ARTWORK || !artworkUri.isNullOrBlank()
+    val streamQuality by viewModel.streamQuality.collectAsState()
+    val health by viewModel.recordingHealth.collectAsState()
+    val device by viewModel.deviceState.collectAsState()
+
+    fun goLive() {
+        val config = LiveStreamConfig(platform, serverUrl, streamKey, videoMode, streamPortrait, artworkUri,
+            quality = streamQuality, recordVideo = videoWillSave, alsoRecordAudio = alsoRecordAudio)
+        localError = if (config.streams) runCatching { config.endpoint() }.exceptionOrNull()?.message else null
+        if (localError != null) { step = 0; return }
+        if (!pictureReady) { step = 1; return }
+        if (videoMode != LiveVideoMode.ARTWORK && ContextCompat.checkSelfPermission(context,
+                Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingCameraConfig = config
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        } else viewModel.startLiveStream(config)
+    }
+
+    // The key remains memory-only so a local encoder/camera failure can be retried.
+    // Changing provider clears it; no draft key is written to preferences or saved state.
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (liveState.isActive) {
+                LiveStatusCard(liveState, captureReady)
+                Text(when {
+                    liveState.localOnly -> "Your camera video and mixer audio are being saved to Movies/DJMRec."
+                    liveState.usesCamera -> "Your camera and mixer audio are streaming to viewers."
+                    else -> "Your artwork and mixer audio are streaming. You can keep recording locally."
+                })
+                if (liveState.recordingVideo) {
+                    Text("Saving video · part ${liveState.videoSegment} · new part every ${VideoRecordingPolicy.SEGMENT_MINUTES} min",
+                        style = MaterialTheme.typography.bodyMedium, color = AccentGreen)
+                }
+                liveState.videoMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = AccentAmber) }
+                if (liveState.overheated) {
+                    Text("Phone is overheating: frame rate and video bitrate reduced until it cools down.",
+                        style = MaterialTheme.typography.bodySmall, color = AccentAmber)
+                }
+                if (liveState.recordingVideo && !liveState.localOnly) {
+                    OutlinedButton(onClick = viewModel::stopVideoRecording, modifier = Modifier.fillMaxWidth()) {
+                        Text("Stop saving video")
+                    }
+                }
+                if (liveState.usesCamera) {
+                    Button(onClick = { viewModel.cameraConsoleOpen.value = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Return to camera")
+                    }
+                }
+                youtubeBroadcast.viewerCount?.let { count ->
+                    Text("${formatViewerCount(count)} watching now",
+                        style = MaterialTheme.typography.titleMedium, color = AccentGreen)
+                }
+                youtubeBroadcast.healthIssues.forEach { issue ->
+                    Text(issue, style = MaterialTheme.typography.bodySmall, color = AccentAmber)
+                }
+                youtubeBroadcast.watchUrl?.let { url ->
+                    OutlinedButton(onClick = { shareBroadcast(url) }) { Text("Share broadcast") }
+                }
+                youtubeBroadcast.studioUrl?.let { url ->
+                    OutlinedButton(onClick = { openUrl(url) }) { Text("Open YouTube Studio") }
+                }
+            } else {
+                if (youtubeBroadcast.status == YouTubeBroadcastStatus.INTERRUPTED) {
+                    Surface(color = AccentAmber.copy(alpha = 0.14f), shape = RoundedCornerShape(4.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("YouTube broadcast still open", style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold)
+                            Text(youtubeBroadcast.message, style = MaterialTheme.typography.bodyMedium)
+                            Button(onClick = viewModel::resumeYouTubeBroadcast,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Text("Resume broadcast")
+                            }
+                            OutlinedButton(onClick = viewModel::endYouTubeBroadcast,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Text("End broadcast")
+                            }
+                        }
+                    }
+                }
+                Text("Share your set", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("Choose a destination and picture, then go live. Your USB mixer arms automatically.",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Connect", "Picture", "Go live").forEachIndexed { index, label ->
+                        FilterChip(selected = step == index,
+                            onClick = { step = index }, enabled = index == 0 || destinationReady && (index == 1 || pictureReady),
+                            label = { Text("${index + 1} $label") })
+                    }
+                }
+                val reducedMotion = rememberReducedMotion()
+                AnimatedContent(
+                    targetState = step,
+                    transitionSpec = {
+                        DjmRecMotion.pageTransform(forward = targetState >= initialState, vertical = true, reduced = reducedMotion)
+                    },
+                    label = "wizardStep"
+                ) { currentStep ->
+                // AnimatedContent stacks its content roots at one origin; this Column restores
+                // the vertical flow between the step's fields.
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                when (currentStep) {
+                    0 -> {
+                        Text("Where are you streaming?", style = MaterialTheme.typography.titleMedium)
+                        LivePlatform.entries.forEach { option ->
+                            LiveChoiceButton(
+                                label = option.label,
+                                selected = platform == option,
+                                enabled = !setupState.isBusy && !authorizing,
+                                onClick = {
+                                    if (platform != option) {
+                                        viewModel.abandonYouTubeSetup()
+                                        platform = option; serverUrl = option.defaultServerUrl
+                                        streamKey = ""; destinationUrl = null; localError = null
+                                        if (option == LivePlatform.LOCAL && videoMode == LiveVideoMode.ARTWORK) {
+                                            videoMode = LiveVideoMode.BACK_CAMERA
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        // Field-level validation feedback: errors point at the field that caused them.
+                        val keyError = localError?.takeIf { it.contains("key", ignoreCase = true) }
+                        val serverError = localError?.takeIf { keyError == null }
+                        when (platform) {
+                            LivePlatform.YOUTUBE -> {
+                                if (destinationReady) {
+                                    Text("YouTube destination ready", color = AccentGreen)
+                                    (youtubeBroadcast.watchUrl ?: destinationUrl)?.let { url ->
+                                        TextButton(onClick = { openUrl(url) }) { Text("Open broadcast") }
+                                    }
+                                } else {
+                                    OutlinedTextField(
+                                        value = youtubeTitle,
+                                        onValueChange = { youtubeTitle = it },
+                                        enabled = !setupState.isBusy && !authorizing,
+                                        label = { Text("Broadcast title") },
+                                        supportingText = { Text(if (youtubeTitle.isBlank()) "Required" else "Shown on YouTube to viewers.") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        YouTubePrivacy.entries.forEach { option ->
+                                            FilterChip(youtubePrivacy == option, { youtubePrivacy = option }, enabled = !setupState.isBusy && !authorizing,
+                                                label = { Text(option.label) })
+                                        }
+                                    }
+                                }
+                            }
+                            LivePlatform.MIXCLOUD -> {
+                                Text("Open Mixcloud, sign in, then copy your stream key here. Mixcloud Pro is required.")
+                                OutlinedButton(onClick = { platform.setupUrl?.let(::openUrl) }) { Text("Open Mixcloud setup") }
+                                StreamKeyField(streamKey, { streamKey = it; localError = null }, "Mixcloud stream key", keyError != null, keyError)
+                            }
+                            LivePlatform.LOCAL -> {
+                                Text("Nothing is streamed. Your camera video and the mixer audio are saved as MP4 in " +
+                                    "Movies/DJMRec, in ${VideoRecordingPolicy.SEGMENT_MINUTES}-minute parts so a crash " +
+                                    "can only cost the part being written.")
+                            }
+                            LivePlatform.CUSTOM -> {
+                                Text("Copy the server and stream key from your streaming service.")
+                                OutlinedTextField(serverUrl, { serverUrl = it; localError = null }, label = { Text("RTMP / RTMPS server") },
+                                    singleLine = true, isError = serverError != null,
+                                    supportingText = serverError?.let { text -> { Text(text) } },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                    modifier = Modifier.fillMaxWidth())
+                                StreamKeyField(streamKey, { streamKey = it; localError = null }, "Stream key", keyError != null, keyError)
+                            }
+                        }
+                        if (setupState.isBusy || authorizing) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                            Text(if (authorizing) "Connecting to Google..." else setupState.message)
+                        } else if (setupState.status == StreamSetupStatus.ERROR) {
+                            Text(setupState.message, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    1 -> {
+                        Text(if (localOnly) "Which camera?" else "What will viewers see?", style = MaterialTheme.typography.titleMedium)
+                        LiveVideoMode.entries.filter { !localOnly || it != LiveVideoMode.ARTWORK }.forEach { option ->
+                            LiveChoiceButton(
+                                label = option.label,
+                                selected = videoMode == option,
+                                onClick = { videoMode = option; localError = null }
+                            )
+                        }
+                        if (videoMode == LiveVideoMode.ARTWORK) {
+                            CustomArtworkPicker(artworkUri, true, { artworkPicker.launch(arrayOf("image/*")) }, {
+                                artworkUri = null
+                                artworkPreferences.edit().remove("custom_artwork_uri").apply()
+                            })
+                            Text("Still artwork uses less power than the camera.", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Stream orientation: $orientationLabel")
+                        }
+                        Text("Matches how you hold your phone when you go live. The stream keeps this shape; on-screen controls rotate with your phone.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (localOnly) "Video quality" else "Stream quality", style = MaterialTheme.typography.titleMedium)
+                        LiveStreamQuality.PRESETS.forEach { option ->
+                            LiveChoiceButton(
+                                label = option.detail,
+                                selected = streamQuality == option,
+                                onClick = { viewModel.setStreamQuality(option) }
+                            )
+                        }
+                        LiveChoiceButton(
+                            label = "Custom",
+                            selected = !streamQuality.preset,
+                            onClick = {
+                                if (streamQuality.preset) {
+                                    viewModel.setStreamQuality(
+                                        streamQuality.copy(id = "custom", label = "Custom", preset = false)
+                                    )
+                                }
+                            }
+                        )
+                        if (!streamQuality.preset) {
+                            Text("Resolution", style = MaterialTheme.typography.titleSmall)
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(720 to 1280, 1080 to 1920, 1440 to 2560).forEach { (height, width) ->
+                                    FilterChip(
+                                        selected = streamQuality.height == height,
+                                        onClick = { viewModel.setStreamQuality(streamQuality.copy(width = width, height = height)) },
+                                        label = { Text("${height}p") }
+                                    )
+                                }
+                            }
+                            Text("Bitrate: ${streamQuality.videoBitrate / 1_000_000} Mbps",
+                                style = MaterialTheme.typography.titleSmall)
+                            Slider(
+                                value = (streamQuality.videoBitrate / 1_000_000).toFloat(),
+                                onValueChange = {
+                                    viewModel.setStreamQuality(streamQuality.copy(videoBitrate = it.toInt() * 1_000_000))
+                                },
+                                valueRange = 5f..30f,
+                                steps = 24
+                            )
+                        }
+                        Text("Higher resolutions and bitrates need a strong upstream connection. If viewers see stuttering or the stream drops, choose 720p or lower the bitrate.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Meters, timers and controls stay on your phone. Viewers see only your camera or artwork.")
+                    }
+                    else -> {
+                        Text(if (localOnly) "Ready to record?" else "Ready for your audience?", style = MaterialTheme.typography.titleMedium)
+                        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(4.dp)) {
+                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(platform.label, fontWeight = FontWeight.Bold)
+                                Text("${videoMode.label} / $orientationLabel")
+                                Text(streamQuality.detail)
+                                Text(device?.productName ?: "No mixer selected")
+                                Text(
+                                    when {
+                                        captureReady -> health.message
+                                        device == null -> "Connect a USB mixer before going live."
+                                        else -> "Mixer monitoring starts automatically when you go live."
+                                    },
+                                    color = if (captureReady && health.level == com.audiopro.djmrec.audio.RecordingHealthLevel.GOOD) AccentGreen
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                StreamSetupMeters(viewModel)
+                            }
+                        }
+                        GoLiveSwitch(
+                            title = "Also record the set",
+                            detail = "Saves the lossless audio (your chosen format) while you ${if (localOnly) "film" else "stream"}. " +
+                                "Streams are compressed and platforms may mute DJ sets, so this is your safe copy.",
+                            checked = alsoRecordAudio,
+                            onChange = { alsoRecordAudio = it }
+                        )
+                        if (!localOnly && videoMode != LiveVideoMode.ARTWORK) {
+                            GoLiveSwitch(
+                                title = "Save video to phone",
+                                detail = "Keeps an MP4 of the camera with 320 kbps mixer audio in Movies/DJMRec, at full " +
+                                    "quality even when the stream has to lower its bitrate.",
+                                checked = saveVideo,
+                                onChange = { saveVideo = it }
+                            )
+                        }
+                        if (videoWillSave) {
+                            Text(VideoRecordingPolicy.storageSummary(viewModel.freeStorageBytes(),
+                                VideoRecordingPolicy.recordBitrate(streamQuality.height)),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("Play music and check both meters before starting. Your phone microphone is never used.")
+                        Text("Livestreaming remains experimental. Check the service's preview after connecting.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                }
+                }
+                if (liveState.status == LiveStreamStatus.ERROR) Text(liveState.message, color = MaterialTheme.colorScheme.error)
+                localError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        }
+        Surface(shadowElevation = 8.dp) {
+            Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (!liveState.isActive && step > 0) TextButton(onClick = { step-- }) { Text("Back") }
+                Button(onClick = {
+                    if (liveState.isActive) confirmEnd = true
+                    else when (step) {
+                        0 -> if (platform == LivePlatform.YOUTUBE && !destinationReady) connectYouTube() else step = 1
+                        1 -> step = 2
+                        else -> goLive()
+                    }
+                }, enabled = liveState.isActive || when (step) {
+                    0 -> !setupState.isBusy && !authorizing && (destinationReady || platform == LivePlatform.YOUTUBE && youtubeTitle.isNotBlank())
+                    1 -> destinationReady && pictureReady
+                    else -> destinationReady && pictureReady && device != null
+                }, modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
+                    Text(if (liveState.isActive) { if (liveState.localOnly) "Stop video" else "End stream" } else when (step) {
+                        0 -> if (platform == LivePlatform.YOUTUBE && !destinationReady) "Connect YouTube" else "Continue"
+                        1 -> if (localOnly) "Review recording" else "Review stream"
+                        else -> if (localOnly) "Start video recording" else "Go live on ${platform.label}"
+                    })
+                }
+            }
+        }
+    }
+    if (confirmEnd) AlertDialog(onDismissRequest = { confirmEnd = false },
+        title = { Text(if (liveState.localOnly) "Stop video recording?" else "End livestream?") },
+        text = { Text(if (liveState.localOnly) "The video is saved to Movies/DJMRec. Any audio recording continues."
+            else "Viewers will disconnect. Any local recording continues.") },
+        confirmButton = { TextButton(onClick = { confirmEnd = false; viewModel.stopLiveStream() }) {
+            Text(if (liveState.localOnly) "Stop video" else "End stream") } },
+        dismissButton = { TextButton(onClick = { confirmEnd = false }) {
+            Text(if (liveState.localOnly) "Keep recording" else "Keep streaming") } })
+}
+
+@Composable
+private fun GoLiveSwitch(title: String, detail: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked, onChange)
+    }
+}
+
+@Composable
+private fun LiveChoiceButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            contentColor = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface
+        ),
+        border = BorderStroke(
+            1.dp,
+            if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+        )
+    ) {
+        Text(label)
+    }
+}
+
+@Composable
+private fun StreamSetupMeters(viewModel: MainViewModel) {
+    val levels by viewModel.levels.collectAsState()
+    com.audiopro.djmrec.ui.components.StereoVuMeter(levels)
+}
+
+@Composable
+private fun CustomArtworkPicker(
+    artworkUri: String?,
+    enabled: Boolean,
+    onChoose: () -> Unit,
+    onRemove: () -> Unit
+) {
+    val context = LocalContext.current
+    var preview by remember { mutableStateOf<Bitmap?>(null) }
+    var previewLoading by remember { mutableStateOf(false) }
+    LaunchedEffect(artworkUri) {
+        previewLoading = !artworkUri.isNullOrBlank()
+        preview = if (artworkUri.isNullOrBlank()) null else withContext(Dispatchers.IO) {
+            decodeArtworkPreview(context, artworkUri)
+        }
+        previewLoading = false
+    }
+    DisposableEffect(preview) {
+        val activeBitmap = preview
+        onDispose { activeBitmap?.recycle() }
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (!artworkUri.isNullOrBlank()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color.Black
+                ) {
+                    val bitmap = preview
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Selected livestream artwork",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else if (previewLoading) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                        }
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Artwork unavailable. Choose another image.")
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(onClick = onChoose, enabled = enabled, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Filled.AddPhotoAlternate, contentDescription = null)
+                        Text("Change", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    OutlinedButton(onClick = onRemove, enabled = enabled) {
+                        Icon(Icons.Filled.DeleteOutline, contentDescription = null)
+                        Text("Remove", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+            } else {
+                Text("Choose an image shown behind your mixer audio. No default artwork is used.")
+                OutlinedButton(
+                    onClick = onChoose,
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.AddPhotoAlternate, contentDescription = null)
+                    Text("Choose artwork", modifier = Modifier.padding(start = 8.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Masked stream-key input with a show/hide toggle (keys are sensitive but must be checkable). */
+@Composable
+private fun StreamKeyField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    isError: Boolean,
+    supportingText: String?
+) {
+    var visible by remember { mutableStateOf(false) }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        isError = isError,
+        supportingText = supportingText?.let { text -> { Text(text) } },
+        visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { visible = !visible }) {
+                Icon(
+                    if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                    contentDescription = if (visible) "Hide stream key" else "Show stream key"
+                )
+            }
+        },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+private fun decodeArtworkPreview(context: Context, artworkUri: String): Bitmap? = runCatching {
+    ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, Uri.parse(artworkUri))) {
+            decoder, info, _ ->
+        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        val longestSide = maxOf(info.size.width, info.size.height)
+        decoder.setTargetSampleSize((longestSide / 1_280).coerceAtLeast(1))
+    }
+}.getOrNull()
+
+/** Silent token renewal for long sets: returns null when re-consent would need user action. */
+private suspend fun silentYouTubeToken(client: AuthorizationClient): String? =
+    suspendCancellableCoroutine { continuation ->
+        val request = AuthorizationRequest.builder()
+            .setRequestedScopes(listOf(Scope("https://www.googleapis.com/auth/youtube.force-ssl")))
+            .build()
+        client.authorize(request)
+            .addOnSuccessListener { result ->
+                continuation.resume(if (result.hasResolution()) null else result.accessToken)
+            }
+            .addOnFailureListener { continuation.resume(null) }
+    }
+
+private fun googleAuthorizationError(context: Context, error: ApiException): String {
+    val unregistered = error.statusCode == CommonStatusCodes.DEVELOPER_ERROR ||
+        error.message.orEmpty().contains("UNREGISTERED_ON_API_CONSOLE", ignoreCase = true)
+    if (!unregistered) return error.localizedMessage ?: "Google authorization failed"
+
+    val sha1 = appSigningSha1(context).ifBlank { "unknown" }
+    return "Google OAuth client missing. Register Android package ${BuildConfig.APPLICATION_ID} " +
+        "with signing SHA-1 $sha1 against client ${BuildConfig.GOOGLE_OAUTH_CLIENT_ID} in " +
+        "Google Cloud, then enable YouTube Data API v3."
+}
+
+@Suppress("DEPRECATION")
+private fun appSigningSha1(context: Context): String = runCatching {
+    val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_SIGNING_CERTIFICATES
+        )
+    } else {
+        context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
+    }
+    val signature = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        packageInfo.signingInfo?.apkContentsSigners?.firstOrNull()
+    } else {
+        packageInfo.signatures?.firstOrNull()
+    } ?: return@runCatching ""
+    MessageDigest.getInstance("SHA-1")
+        .digest(signature.toByteArray())
+        .joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xFF) }
+}.getOrDefault("")
+
+@Composable
+private fun LiveStatusCard(liveState: LiveStreamState, captureReady: Boolean) {
+    val color = when (liveState.status) {
+        LiveStreamStatus.LIVE -> AccentRed
+        LiveStreamStatus.PREPARING,
+        LiveStreamStatus.CONNECTING,
+        LiveStreamStatus.RECONNECTING -> AccentAmber
+        LiveStreamStatus.ERROR -> AccentRed
+        LiveStreamStatus.IDLE -> if (captureReady) AccentGreen else MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val message = if (liveState.status == LiveStreamStatus.IDLE && !captureReady) {
+        "Connect mixer and wait for USB signal"
+    } else liveState.message
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(4.dp),
+        color = color.copy(alpha = 0.10f)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.background(color, CircleShape).padding(5.dp))
+                Text(
+                    if (liveState.localOnly && liveState.status == LiveStreamStatus.LIVE) "RECORDING VIDEO"
+                    else liveState.status.name.replace('_', ' '),
+                    color = color,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                if (liveState.status == LiveStreamStatus.PREPARING ||
+                    liveState.status == LiveStreamStatus.CONNECTING ||
+                    liveState.status == LiveStreamStatus.RECONNECTING) {
+                    CircularProgressIndicator(modifier = Modifier.height(16.dp), strokeWidth = 2.dp, color = color)
+                }
+            }
+            Text(message, style = MaterialTheme.typography.titleMedium)
+            if (liveState.isActive) {
+                Text(
+                    if (liveState.audioPcmBytes == 0L) "Mixer audio: waiting for PCM"
+                    else String.format(
+                        Locale.US,
+                        "Mixer audio: %.1f dBFS",
+                        liveState.audioPeakDb
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (liveState.audioPcmBytes == 0L) AccentAmber
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (liveState.status == LiveStreamStatus.LIVE && !liveState.localOnly) {
+                val mbps = liveState.bitrateBitsPerSecond / 1_000_000f
+                Text(
+                    String.format(
+                        Locale.US,
+                        "Upload %.2f Mbps",
+                        mbps
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (liveState.usesCamera) {
+                    Text(
+                        "Camera ${if (liveState.cameraOpened) "open" else "opening"} | " +
+                            "captured ${liveState.cameraFramesCaptured} frames",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (liveState.droppedAudioFrames > 0 || liveState.droppedVideoFrames > 0) Text(
+                    "Dropped audio ${liveState.droppedAudioFrames} | video ${liveState.droppedVideoFrames}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}

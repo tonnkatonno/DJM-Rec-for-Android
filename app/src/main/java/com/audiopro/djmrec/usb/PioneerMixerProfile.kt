@@ -1,6 +1,6 @@
 package com.audiopro.djmrec.usb
 
-/** USB identities whose proprietary MIX/REC OUT routing is implemented natively. */
+/** USB identities with known Pioneer mixer USB contracts and optional proprietary routing. */
 enum class PioneerMixerProfile(
     val displayName: String,
     val productIds: Set<Int>,
@@ -57,6 +57,7 @@ enum class PioneerMixerProfile(
     val vendorCaptureChannelCount: Int = -1,
     val vendorCaptureSubframeSize: Int = -1,
     val vendorCaptureBitResolution: Int = -1,
+    val vendorCaptureSampleRates: List<Int> = emptyList(),
     /**
      * Extra 0-based output indices (beyond [defaultCaptureChannelOffset]'s output) that
      * [com.audiopro.djmrec.usb.UsbAudioManager.establishPioneerRoute] should also set to MIX.
@@ -71,6 +72,15 @@ enum class PioneerMixerProfile(
         "DJM-A9", setOf(0x003C), 8, 5, RouteReadMode.SINGLE_OUTPUT_ZERO_BASED,
         listOf(0x0A, 0x0A, 0x0A, 0x0A, 0x0A), true, 1, 1
     ),
+    DJM_V10(
+        "DJM-V10", setOf(0x0034), 0, 6, RouteReadMode.NONE,
+        List(6) { 0x0A },
+        requiresPlaybackTraffic = true, playbackInterface = 0, playbackAlternateSetting = 1,
+        vendorCaptureInterface = 0, vendorCaptureAlternateSetting = 1,
+        vendorCaptureChannelCount = 12, vendorCaptureSubframeSize = 3,
+        vendorCaptureBitResolution = 24,
+        vendorCaptureSampleRates = listOf(44_100, 48_000, 96_000)
+    ),
     DJM_V5(
         "DJM-V5", setOf(0x0058, 0x0059, 0x005A, 0x005B), 0, 4,
         RouteReadMode.SINGLE_OUTPUT_ONE_BASED, listOf(0x0E, 0x0E, 0x0E, 0x0E)
@@ -81,28 +91,56 @@ enum class PioneerMixerProfile(
         requiresPlaybackTraffic = true, playbackInterface = 0, playbackAlternateSetting = 1,
         vendorCaptureInterface = 0, vendorCaptureAlternateSetting = 1,
         vendorCaptureChannelCount = 12, vendorCaptureSubframeSize = 3, vendorCaptureBitResolution = 24,
+        vendorCaptureSampleRates = listOf(96_000),
         additionalMixOutputs = listOf(4)
     ),
     DJM_750MK2(
         "DJM-750MK2", setOf(0x001B), 0, 5, RouteReadMode.ALL_OUTPUTS,
-        listOf(0x0F, 0x0F, 0x0F, 0x0F, 0x0A)
+        listOf(0x0F, 0x0F, 0x0F, 0x0F, 0x0A),
+        requiresPlaybackTraffic = true, playbackInterface = 0, playbackAlternateSetting = 1,
+        vendorCaptureInterface = 0, vendorCaptureAlternateSetting = 1,
+        vendorCaptureChannelCount = 12, vendorCaptureSubframeSize = 3,
+        vendorCaptureBitResolution = 24, vendorCaptureSampleRates = listOf(96_000)
+    ),
+    // ALSA DJM-S11 contract: capture if2, playback if1, MIX REC OUT on USB5/6 only.
+    DJM_S11(
+        "DJM-S11", setOf(0x0037), 4, 3, RouteReadMode.NONE,
+        listOf(-1, -1, 0x0A),
+        requiresPlaybackTraffic = true, playbackInterface = 1, playbackAlternateSetting = 1,
+        vendorCaptureInterface = 2, vendorCaptureAlternateSetting = 1,
+        vendorCaptureChannelCount = 10, vendorCaptureSubframeSize = 3,
+        vendorCaptureBitResolution = 24, vendorCaptureSampleRates = listOf(48_000)
+    ),
+    DJM_450(
+        "DJM-450", setOf(0x0013), 0, 3, RouteReadMode.NONE,
+        listOf(0x0A, 0x0A, 0x0A),
+        requiresPlaybackTraffic = true, playbackInterface = 0, playbackAlternateSetting = 1,
+        vendorCaptureInterface = 0, vendorCaptureAlternateSetting = 1,
+        vendorCaptureChannelCount = 8, vendorCaptureSubframeSize = 3,
+        vendorCaptureBitResolution = 24, vendorCaptureSampleRates = listOf(48_000)
     );
 
     val hasVendorCaptureOverride: Boolean get() = vendorCaptureInterface >= 0
 
+    /** Recording confirmed by the project owner; other profiles still need physical testing. */
+    val isHardwareConfirmed: Boolean get() = this == DJM_A9 || this == DJM_750MK2
+
     enum class RouteReadMode(val responseLength: Int) {
+        NONE(0),
         SINGLE_OUTPUT_ZERO_BASED(2),
         SINGLE_OUTPUT_ONE_BASED(2),
         ALL_OUTPUTS(5)
     }
 
     fun routeReadValue(outputIndex: Int): Int = when (routeReadMode) {
+        RouteReadMode.NONE -> 0
         RouteReadMode.SINGLE_OUTPUT_ZERO_BASED -> outputIndex
         RouteReadMode.SINGLE_OUTPUT_ONE_BASED -> outputIndex + 1
         RouteReadMode.ALL_OUTPUTS -> 0
     }
 
     fun decodeRouteSource(response: ByteArray, outputIndex: Int): Int? = when (routeReadMode) {
+        RouteReadMode.NONE -> null
         RouteReadMode.SINGLE_OUTPUT_ZERO_BASED,
         RouteReadMode.SINGLE_OUTPUT_ONE_BASED -> response.getOrNull(1)?.toInt()?.and(0xFF)
         RouteReadMode.ALL_OUTPUTS -> response.getOrNull(outputIndex)?.toInt()?.and(0xFF)
@@ -110,6 +148,7 @@ enum class PioneerMixerProfile(
 
     fun isRouteResponseValid(response: ByteArray, outputIndex: Int): Boolean =
         response.size == routeReadMode.responseLength && when (routeReadMode) {
+            RouteReadMode.NONE -> false
             RouteReadMode.SINGLE_OUTPUT_ZERO_BASED ->
                 response.firstOrNull()?.toInt()?.and(0xFF) == outputIndex
             RouteReadMode.SINGLE_OUTPUT_ONE_BASED ->

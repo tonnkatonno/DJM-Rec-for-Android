@@ -1,309 +1,235 @@
 ﻿package com.audiopro.djmrec.ui
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Coffee
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.audiopro.djmrec.integrations.drive.DriveAuthManager
-import com.audiopro.djmrec.integrations.drive.DriveUploadManager
-import com.audiopro.djmrec.integrations.soundcloud.SoundCloudAuthManager
-import com.audiopro.djmrec.integrations.soundcloud.SoundCloudUploadManager
+import com.audiopro.djmrec.BuildConfig
+import com.audiopro.djmrec.ui.theme.TextSecondary
+import com.audiopro.djmrec.update.AppUpdate
+import com.audiopro.djmrec.update.UpdateCheckResult
+import com.audiopro.djmrec.update.UpdateChecker
+import com.audiopro.djmrec.update.UpdateInstaller
 import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
-    val waveformEnabled by viewModel.waveformEnabled.collectAsState()
+    val waveform by viewModel.waveformEnabled.collectAsState()
+    val smooth by viewModel.smoothWaveform.collectAsState()
+    val keepScreen by viewModel.keepScreenOn.collectAsState()
+    val confirm by viewModel.confirmStop.collectAsState()
+    val trimSilence by viewModel.trimLeadingSilence.collectAsState()
+    val limiter by viewModel.safetyLimiter.collectAsState()
+    val preRecord by viewModel.preRecord.collectAsState()
+    val autoStopMinutes by viewModel.silenceAutoStopMinutes.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
-    var driveConnected by remember { mutableStateOf(DriveUploadManager.getConnectedHint(context)) }
-    var driveAutoUpload by remember { mutableStateOf(DriveUploadManager.isAutoUploadEnabled(context)) }
-    var driveConnecting by remember { mutableStateOf(false) }
-    var driveError by remember { mutableStateOf<String?>(null) }
-
-    val consentLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        driveConnecting = false
-        when (val outcome = DriveAuthManager.resultFromIntent(context, result.data)) {
-            is DriveAuthManager.Outcome.Authorized -> {
-                driveConnected = true
-                driveError = null
-                DriveUploadManager.setConnectedHint(context, true)
-            }
-            is DriveAuthManager.Outcome.Failed -> driveError = outcome.message
-            is DriveAuthManager.Outcome.NeedsConsent -> driveError = "Google Drive connection was not completed"
+    val diagnostics by com.audiopro.djmrec.diagnostics.RemoteDiagnostics.enabled.collectAsState()
+    val diagnosticsStatus by com.audiopro.djmrec.diagnostics.RemoteDiagnostics.status.collectAsState()
+    var availableUpdate by remember { mutableStateOf<AppUpdate?>(null) }
+    var pendingPermissionUpdate by remember { mutableStateOf<AppUpdate?>(null) }
+    var installRequest by remember { mutableStateOf<AppUpdate?>(null) }
+    var updateBusy by remember { mutableStateOf(false) }
+    var updateStatus by remember { mutableStateOf<String?>(null) }
+    var updateError by remember { mutableStateOf(false) }
+    val unknownSourcesPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val update = pendingPermissionUpdate
+        pendingPermissionUpdate = null
+        if (update != null && context.packageManager.canRequestPackageInstalls()) {
+            installRequest = update
+        } else if (update != null) {
+            updateError = true
+            updateStatus = "Install permission was not granted."
         }
     }
 
-    fun connectDrive() {
-        driveConnecting = true
-        driveError = null
+    LaunchedEffect(installRequest?.tag) {
+        val update = installRequest ?: return@LaunchedEffect
+        updateBusy = true
+        updateError = false
+        updateStatus = "Downloading DJM REC ${update.version}..."
+        runCatching { UpdateInstaller.download(context.applicationContext, update) }
+            .onSuccess { apk ->
+                updateStatus = "Download verified. Opening Android installer..."
+                runCatching { UpdateInstaller.install(context, apk) }
+                    .onFailure { error ->
+                        updateError = true
+                        updateStatus = error.message ?: "Could not open Android installer"
+                    }
+            }
+            .onFailure { error ->
+                updateError = true
+                updateStatus = error.message ?: "Update download failed"
+            }
+        updateBusy = false
+        installRequest = null
+    }
+
+    fun checkForUpdates() {
         scope.launch {
-            when (val outcome = DriveAuthManager.requestAccess(context)) {
-                is DriveAuthManager.Outcome.Authorized -> {
-                    driveConnecting = false
-                    driveConnected = true
-                    DriveUploadManager.setConnectedHint(context, true)
+            updateBusy = true
+            updateError = false
+            updateStatus = "Checking GitHub for updates..."
+            when (val result = UpdateChecker.checkNow(context.applicationContext)) {
+                is UpdateCheckResult.Available -> {
+                    availableUpdate = result.update
+                    updateStatus = "DJM REC ${result.update.version} is available."
                 }
-                is DriveAuthManager.Outcome.NeedsConsent -> {
-                    consentLauncher.launch(
-                        IntentSenderRequest.Builder(outcome.pendingIntent.intentSender).build()
-                    )
+                UpdateCheckResult.Current -> {
+                    availableUpdate = null
+                    updateStatus = "DJM REC is up to date."
                 }
-                is DriveAuthManager.Outcome.Failed -> {
-                    driveConnecting = false
-                    driveError = outcome.message
+                is UpdateCheckResult.Failed -> {
+                    updateError = true
+                    updateStatus = result.message
                 }
             }
+            updateBusy = false
         }
     }
 
-    val scConnectedState by SoundCloudAuthManager.connectedFlow(context).collectAsState()
-    val scConnected = scConnectedState == true
-    val scNeedsReconnect by SoundCloudAuthManager.needsReconnect.collectAsState()
-    var scAutoUpload by remember { mutableStateOf(SoundCloudUploadManager.isAutoUploadEnabled(context)) }
-    val scConnectStatus by SoundCloudAuthManager.connectStatus.collectAsState()
-    // Only the token exchange itself blocks the button -- a login tab the user just closed
-    // must never leave CONNECT stuck disabled.
-    val scConnecting = scConnectStatus == SoundCloudAuthManager.ConnectStatus.EXCHANGING
-    val scError = if (scConnectStatus == SoundCloudAuthManager.ConnectStatus.FAILED && !scConnected) {
-        "SoundCloud login was not completed -- tap CONNECT to try again"
-    } else {
-        null
+    fun requestInstall(update: AppUpdate) {
+        if (context.packageManager.canRequestPackageInstalls()) {
+            installRequest = update
+        } else {
+            pendingPermissionUpdate = update
+            updateStatus = "Allow DJM REC to install updates, then return here."
+            unknownSourcesPermission.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${context.packageName}")
+                )
+            )
+        }
     }
-    var showSoundCloudDefaults by remember { mutableStateOf(false) }
 
+    var showSoundCloudDefaults by remember { mutableStateOf(false) }
     if (showSoundCloudDefaults) {
         SoundCloudDefaultsScreen(onBack = { showSoundCloudDefaults = false })
         return
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(
-            "RECORDING DISPLAY",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(4.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Live waveform", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Show the RGB waveform while monitoring and recording. Turn it off to reduce battery use; input meters stay active.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = waveformEnabled,
-                    onCheckedChange = viewModel::setWaveformEnabled
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text("Capture", style = MaterialTheme.typography.titleLarge)
+        Text("Monitoring arms automatically after USB connection and permission. Recording starts only when you press Record.", color = TextSecondary)
+        PreferenceSwitch("Safety limiter", "Catches loud peaks at -1 dBFS instead of clipping them, so a hot mix or +12 dB gain stays clean in the recording and the livestream.", limiter, viewModel::setSafetyLimiter)
+        PreferenceSwitch("Pre-record buffer", "Keeps the last 15 seconds while the mixer is connected, so pressing Record late still captures the start of the mix.", preRecord, viewModel::setPreRecord)
+        SilenceAutoStopPreference(autoStopMinutes, viewModel::setSilenceAutoStopMinutes)
+        PreferenceSwitch("Trim leading silence", "Start the file at the first sound, keeping half a second of lead-in. Removes the few silent seconds before the mixer's audio arrives. Applies to the next recording.", trimSilence, viewModel::setTrimLeadingSilence)
+        PreferenceSwitch("Confirm stop", "Ask before stopping from the recorder. Notification Save & close always acts immediately.", confirm, viewModel::setConfirmStop)
+        Surface(shape = RoundedCornerShape(4.dp), tonalElevation = 0.dp) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { RecordingSetupControls(viewModel) }
+        }
+        CloudUploadSettings(onOpenSoundCloudDefaults = { showSoundCloudDefaults = true })
+        Text("Diagnostics & privacy", style = MaterialTheme.typography.titleLarge)
+        PreferenceSwitch("Automatic diagnostics", "Send bounded mixer connection and recording-health events to Firebase Analytics, plus non-fatal errors and crashes to Crashlytics. No recorded audio or filenames. Enabled by default in production builds.",
+            diagnostics, com.audiopro.djmrec.diagnostics.RemoteDiagnostics::setEnabled)
+        Text(diagnosticsStatus, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+        Text("Display", style = MaterialTheme.typography.titleLarge)
+        PreferenceSwitch("Live waveform", "CDJ-style layered bands: blue = low, amber = mid, white = high.", waveform, viewModel::setWaveformEnabled)
+        PreferenceSwitch("Smooth waveform", "Scroll at the display frame rate. Turn off to reduce graphics work.", smooth, viewModel::setSmoothWaveform)
+        PreferenceSwitch("Keep recorder screen awake", "Recording always keeps the device awake; this also keeps the screen on while monitoring. Capture continues if the screen locks.", keepScreen, viewModel::setKeepScreenOn)
+        Text("Background recording", style = MaterialTheme.typography.titleLarge)
+        Text("Keep the persistent notification enabled. Allow background battery use in Android settings for long sets. Force-stop, reboot or disconnecting USB still ends capture.", color = TextSecondary)
+        OutlinedButton(onClick = {
+            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+        }, modifier = Modifier.fillMaxWidth()) { Text("Android app settings") }
+        Text("App updates", style = MaterialTheme.typography.titleLarge)
+        Surface(shape = RoundedCornerShape(4.dp), tonalElevation = 0.dp) {
+            Column(Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("DJM REC", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Installed version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
                 )
-            }
-        }
-
-        Text(
-            "CLOUD",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(4.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-        ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Google Drive", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            if (driveConnected) "Connected" else "Not connected",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = ::connectDrive,
-                        enabled = !driveConnecting,
-                        shape = RoundedCornerShape(3.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-                    ) {
-                        Text(if (driveConnected) "RECONNECT" else "CONNECT", style = MaterialTheme.typography.labelSmall)
-                    }
+                updateStatus?.let { status ->
+                    Text(
+                        status,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (updateError) MaterialTheme.colorScheme.error else TextSecondary
+                    )
                 }
-                driveError?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("Auto-upload new recordings", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Every finished take is queued for Drive upload automatically. Requires Drive to be connected above.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = driveAutoUpload,
-                        onCheckedChange = { enabled ->
-                            driveAutoUpload = enabled
-                            DriveUploadManager.setAutoUploadEnabled(context, enabled)
-                        }
+                if (updateBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                OutlinedButton(
+                    onClick = ::checkForUpdates,
+                    enabled = !updateBusy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) { Text(if (updateBusy) "Please wait" else "Check for updates") }
+                availableUpdate?.let { update ->
+                    Button(
+                        onClick = { requestInstall(update) },
+                        enabled = !updateBusy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    ) { Text("Download & install ${update.version}") }
+                    Text(
+                        "Download is verified before Android asks you to confirm installation.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
                     )
                 }
             }
         }
+        Text("Support DJM REC", style = MaterialTheme.typography.titleLarge)
+        Surface(shape = RoundedCornerShape(4.dp), tonalElevation = 0.dp) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "DJM REC is free and made for DJs. If it saved your set, you can buy me a coffee.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
+                )
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://buymeacoffee.com/p2gr")))
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Filled.Coffee, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Buy me a coffee")
+                }
+            }
+        }
+    }
+}
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(4.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-        ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("SoundCloud", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            when {
-                                scConnecting -> "Connecting…"
-                                scConnected -> "Connected"
-                                scNeedsReconnect -> "Login expired -- tap CONNECT"
-                                else -> "Not connected"
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = { SoundCloudAuthManager.launchAuthorization(context) },
-                        enabled = !scConnecting,
-                        shape = RoundedCornerShape(3.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-                    ) {
-                        Text(if (scConnected) "RECONNECT" else "CONNECT", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-                scError?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("Auto-upload new recordings", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Uploaded as a private track (not publicly listed) -- requires SoundCloud to be connected above.",
-                            style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = scAutoUpload,
-                        onCheckedChange = { enabled ->
-                            scAutoUpload = enabled
-                            SoundCloudUploadManager.setAutoUploadEnabled(context, enabled)
-                        }
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showSoundCloudDefaults = true },
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("Upload defaults", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Genre, tags, description applied to every upload",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SilenceAutoStopPreference(minutes: Int, onChange: (Int) -> Unit) {
+    Surface(shape = RoundedCornerShape(4.dp), tonalElevation = 0.dp) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Auto-stop after silence", style = MaterialTheme.typography.titleSmall)
+            Text("Saves and stops a recording left running after the music ends, for example at the end of the night. A livestream keeps running.",
+                style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(0, 5, 10, 20, 30).forEach { option ->
+                    FilterChip(
+                        selected = minutes == option,
+                        onClick = { onChange(option) },
+                        label = { Text(if (option == 0) "Off" else "$option min") }
                     )
                 }
             }
@@ -311,83 +237,16 @@ fun SettingsScreen(viewModel: MainViewModel) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SoundCloudDefaultsScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    var scGenre by remember { mutableStateOf(SoundCloudUploadManager.getDefaultGenre(context)) }
-    var scTags by remember { mutableStateOf(SoundCloudUploadManager.getDefaultTags(context)) }
-    var scDescription by remember { mutableStateOf(SoundCloudUploadManager.getDefaultDescription(context)) }
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("SOUNDCLOUD DEFAULTS", style = MaterialTheme.typography.labelSmall) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Text(
-                "Applied to every upload -- manual or auto -- so nothing needs retyping on soundcloud.com afterward.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            OutlinedTextField(
-                value = scGenre,
-                onValueChange = { scGenre = it; SoundCloudUploadManager.setDefaultGenre(context, it) },
-                label = { Text("Default genre") },
-                singleLine = true,
-                shape = RoundedCornerShape(3.dp),
-                colors = nfTextFieldColors(),
-                textStyle = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = scTags,
-                onValueChange = { scTags = it; SoundCloudUploadManager.setDefaultTags(context, it) },
-                label = { Text("Default tags") },
-                placeholder = { Text("neurofunk, dnb, neuro") },
-                singleLine = true,
-                shape = RoundedCornerShape(3.dp),
-                colors = nfTextFieldColors(),
-                textStyle = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = scDescription,
-                onValueChange = { scDescription = it; SoundCloudUploadManager.setDefaultDescription(context, it) },
-                label = { Text("Default description") },
-                minLines = 4,
-                maxLines = 10,
-                shape = RoundedCornerShape(3.dp),
-                colors = nfTextFieldColors(),
-                textStyle = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.fillMaxWidth()
-            )
+private fun PreferenceSwitch(title: String, detail: String, value: Boolean, onChange: (Boolean) -> Unit) {
+    Surface(shape = RoundedCornerShape(4.dp), tonalElevation = 0.dp) {
+        Row(Modifier.fillMaxWidth().toggleable(value = value, role = Role.Switch, onValueChange = onChange).padding(16.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            }
+            Switch(value, null)
         }
     }
 }
-
-/** Hairline-bordered, dim-labeled field colors matching the brand's outline tone instead of
- *  Material3's default (comparatively heavy, blue-tinted) outlined text field look. */
-@Composable
-private fun nfTextFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedBorderColor = MaterialTheme.colorScheme.primary,
-    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-    focusedLabelColor = MaterialTheme.colorScheme.primary,
-    unfocusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    cursorColor = MaterialTheme.colorScheme.primary
-)

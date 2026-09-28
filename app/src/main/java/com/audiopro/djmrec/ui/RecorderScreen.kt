@@ -1,461 +1,313 @@
 package com.audiopro.djmrec.ui
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.audiopro.djmrec.audio.RecordingState
-import com.audiopro.djmrec.ui.components.ChannelPairSelector
-import com.audiopro.djmrec.ui.components.DeviceStatusCard
-import com.audiopro.djmrec.ui.components.FormatSelector
-import com.audiopro.djmrec.ui.components.MaxFileSizeSelector
-import com.audiopro.djmrec.ui.components.RgbWaveform
-import com.audiopro.djmrec.ui.components.StereoVuMeter
-import com.audiopro.djmrec.ui.components.TransportControls
-import com.audiopro.djmrec.ui.theme.AccentGreen
-import com.audiopro.djmrec.ui.theme.AccentRed
-import com.audiopro.djmrec.ui.theme.NfReadout
+import com.audiopro.djmrec.audio.*
+import com.audiopro.djmrec.ui.components.*
+import com.audiopro.djmrec.ui.theme.*
 import java.util.Locale
 
-private val NfPanelShape = RoundedCornerShape(4.dp)
-private val NfBadgeShape = RoundedCornerShape(3.dp)
-
+/** Fixed recording workspace; detailed controls live in a sheet. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecorderScreen(viewModel: MainViewModel) {
+fun RecorderScreen(viewModel: MainViewModel, onOpenLibrary: () -> Unit = {}) {
     val device by viewModel.deviceState.collectAsState()
-    val recordingState by viewModel.recordingState.collectAsState()
+    val state by viewModel.recordingState.collectAsState()
+    val saving by viewModel.saving.collectAsState()
     val levels by viewModel.levels.collectAsState()
-    val elapsedMillis by viewModel.elapsedMillis.collectAsState()
-    val waveformBins by viewModel.waveformBins.collectAsState()
-    val waveformEnabled by viewModel.waveformEnabled.collectAsState()
-    val gainDb by viewModel.gainDb.collectAsState()
-    val monitoringEnabled by viewModel.monitoringEnabled.collectAsState()
-    val selectedFormat by viewModel.selectedFormat.collectAsState()
-    val djmrecPortMode by viewModel.djmrecPortMode.collectAsState()
-    val otgStatus by viewModel.otgStatus.collectAsState()
-    val usbChannelOffset by viewModel.usbChannelOffset.collectAsState()
-    val maxFileSizeMb by viewModel.maxFileSizeMb.collectAsState()
-    val trackMarkCount by viewModel.trackMarkCount.collectAsState()
-    val lowStorageWarning by viewModel.lowStorageWarning.collectAsState()
+    val elapsed by viewModel.elapsedMillis.collectAsState()
+    val awaitingAudio by viewModel.awaitingAudio.collectAsState()
+    val limiterReduction by viewModel.limiterReductionDb.collectAsState()
+    val waveform by viewModel.waveformEnabled.collectAsState()
+    val smooth by viewModel.smoothWaveform.collectAsState()
+    val confirmStop by viewModel.confirmStop.collectAsState()
+    val health by viewModel.recordingHealth.collectAsState()
+    val format by viewModel.selectedFormat.collectAsState()
+    val gain by viewModel.recordingGainDb.collectAsState()
+    val saved by viewModel.lastSaved.collectAsState()
+    val trackMarks by viewModel.trackMarkCount.collectAsState()
+    var setupOpen by rememberSaveable { mutableStateOf(false) }
+    var stopPrompt by rememberSaveable { mutableStateOf(false) }
+    var detailsOpen by rememberSaveable { mutableStateOf(false) }
+    var inputsOpen by rememberSaveable { mutableStateOf(false) }
+    // Hoisted to the view model so MainScreen can hide the app chrome for true fullscreen.
+    var powerSave by viewModel.powerSaveActive
+    val connectionNotice by viewModel.connectionNotice.collectAsState()
     val context = LocalContext.current
-
-    LaunchedEffect(device?.deviceName) {
-        if (device != null) viewModel.ensureLiveMonitoring()
+    val active = state is RecordingState.Recording || state is RecordingState.Paused
+    val signal = levels.left.peakDb > -55 || levels.right.peakDb > -55
+    // Keep-awake is owned by MainActivity (window flag) so it holds on every screen while a
+    // recording is active; this screen no longer toggles it.
+    if (inputsOpen) InputPicker(viewModel) { inputsOpen = false }
+    if (setupOpen) ModalBottomSheet(onDismissRequest = { setupOpen = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Recording setup", style = MaterialTheme.typography.headlineSmall)
+            RecordingSetupControls(viewModel)
+            Button(onClick = { setupOpen = false }, modifier = Modifier.fillMaxWidth()) { Text("Done") }
+        }
     }
-
-    val otgWarning = otgStatus
-    if (djmrecPortMode && otgWarning != null && !otgWarning.enabled) {
-        AlertDialog(
-            onDismissRequest = viewModel::dismissOtgWarning,
-            title = { Text("USB OTG may be disabled") },
+    if (stopPrompt) AlertDialog(onDismissRequest = { stopPrompt = false },
+        title = { Text("Save this set?") }, text = { Text("Recording will finish. Input monitoring stays ready for your next set.") },
+        confirmButton = { TextButton(onClick = { stopPrompt = false; powerSave = false; viewModel.stopRecording() }) { Text("Stop & save") } },
+        dismissButton = { TextButton(onClick = { stopPrompt = false }) { Text("Keep recording") } })
+    if (detailsOpen) AlertDialog(onDismissRequest = { detailsOpen = false }, title = { Text("Input status") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text((state as? RecordingState.Error)?.message ?: health.message)
+            Text(device?.allInOneProfile?.setupHint ?: device?.pioneerMixerProfile?.let {
+                if (it.isHardwareConfirmed) "Recording confirmed on ${it.displayName}."
+                else "${it.displayName}: implemented profile, physical validation pending."
+            } ?: "Use a USB audio data cable. Grant audio and USB permission when prompted.")
+            if (health.freeBytes in 1 until Long.MAX_VALUE)
+                Text(String.format(Locale.US, "%.1f GB available", health.freeBytes / 1_073_741_824.0))
+        } }, confirmButton = { TextButton(onClick = { detailsOpen = false }) { Text("OK") } })
+    val inputHeader: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).background(if (device != null) AccentGreen else TextSecondary, CircleShape))
+            Column(Modifier.weight(1f).heightIn(min = 48.dp).clickable { inputsOpen = true }.padding(horizontal = 10.dp),
+                verticalArrangement = Arrangement.Center) {
+                Text(device?.productName ?: "Connect your mixer", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleMedium)
+                Text(device?.let { "${it.preferredSampleRate / 1000f} kHz / ${it.bitResolution}-bit / USB" }
+                    ?: "USB audio input", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+            }
+            IconButton(onClick = { powerSave = true }) {
+                Icon(Icons.Default.BatterySaver, "Power saving mode")
+            }
+            IconButton(onClick = { inputsOpen = true }) {
+                Icon(Icons.Default.Usb, "Choose audio input")
+            }
+            FilledTonalIconButton(onClick = { setupOpen = true }) { Icon(Icons.Default.Tune, "Recording setup") }
+        }
+    }
+    val signalPanel: @Composable () -> Unit = {
+        Surface(Modifier.fillMaxSize(), shape = RoundedCornerShape(4.dp), color = SurfaceDark) {
+            BoxWithConstraints(Modifier.padding(12.dp)) {
+                val compact = maxHeight < 160.dp
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        val label = when {
+                            saving -> "SAVING"
+                            state is RecordingState.Recording -> "REC"
+                            state is RecordingState.Paused -> "PAUSED"
+                            state is RecordingState.Preparing -> "ARMING"
+                            state is RecordingState.Monitoring -> if (signal) "INPUT LIVE" else "ARMED / NO SIGNAL"
+                            else -> "STANDBY"
+                        }
+                        AnimatedContent(targetState = label, label = "captureStatus") { status ->
+                            Text(status, color = if (active) AccentRed else AccentGreen,
+                                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                        }
+                        Text(if (waveform) "3-BAND" else "METERS", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    }
+                    if (waveform && !compact) LiveRgbWaveform(viewModel.waveformBins, Modifier.fillMaxWidth().weight(1f), smooth = smooth,
+                        active = state is RecordingState.Monitoring || active, onVisible = viewModel::setWaveformVisible)
+                    else if (!compact) Spacer(Modifier.weight(1f))
+                    StereoVuMeter(levels)
+                }
+            }
+        }
+    }
+    val transport: @Composable (Boolean) -> Unit = { compact ->
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!compact) {
+            val message = when {
+                saving -> "Finalizing your recording..."
+                state is RecordingState.Error -> (state as RecordingState.Error).message
+                active && (levels.left.isClipping || levels.right.isClipping) -> "Clipping: lower mixer output"
+                active && limiterReduction >= 3f ->
+                    String.format(Locale.US, "Limiter catching peaks (-%.0f dB): lower mixer output or gain", limiterReduction)
+                state is RecordingState.Recording && awaitingAudio &&
+                    (health.level == RecordingHealthLevel.GOOD || health.level == RecordingHealthLevel.SILENCE) ->
+                    "Waiting for audio. Silence before the first sound is trimmed from the file."
+                active -> health.message
+                device == null -> connectionNotice ?: "Connect mixer, grant USB access, check signal"
+                else -> health.message
+            }
+            val attention = saving || state is RecordingState.Error ||
+                (active && (levels.left.isClipping || levels.right.isClipping || limiterReduction >= 3f)) ||
+                health.level == RecordingHealthLevel.LOW_BATTERY || health.level == RecordingHealthLevel.OVERHEATING
+            Surface(shape = RoundedCornerShape(4.dp), color = SurfaceVariantDark.copy(alpha = 0.5f)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { detailsOpen = true }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Icon(if (attention) Icons.Default.WarningAmber else Icons.Default.Info, null,
+                        Modifier.size(18.dp), tint = if (attention) AccentAmber else TextSecondary)
+                    Text(message, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(18.dp), tint = TextSecondary)
+                }
+            }
+        }
+        Column {
+            Text(elapsedText(elapsed), style = MaterialTheme.typography.headlineLarge.copy(fontFamily = FontFamily.Monospace))
+            Text("${format.name} / ${if (gain > 0) "+" else ""}$gain dB", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+        }
+        val reducedMotion = rememberReducedMotion()
+        AnimatedContent(
+            targetState = active,
+            transitionSpec = { DjmRecMotion.fadeTransform(reduced = reducedMotion) },
+            label = "transport"
+        ) { transportActive ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (transportActive) {
+                OutlinedButton(onClick = { if (state is RecordingState.Paused) viewModel.resumeRecording() else viewModel.pauseRecording() },
+                    enabled = !saving, modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
+                    Icon(if (state is RecordingState.Paused) Icons.Default.PlayArrow else Icons.Default.Pause, null)
+                    Text(if (state is RecordingState.Paused) "Resume" else "Pause")
+                }
+                Button(onClick = { if (confirmStop) stopPrompt = true else viewModel.stopRecording() }, enabled = !saving,
+                    modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
+                    if (saving) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Stop, null)
+                    Text(if (saving) " Saving" else " Save set")
+                }
+            } else {
+                Button(onClick = viewModel::startRecording, enabled = device != null && state !is RecordingState.Preparing && !saving,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentRed, contentColor = BackgroundDark)) {
+                    if (state is RecordingState.Preparing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.FiberManualRecord, null)
+                    Text(if (state is RecordingState.Preparing) " Arming input" else " Record set", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        }
+        if (state is RecordingState.Recording && !saving) {
+            // Timestamps a track change; the tracklist goes into the SoundCloud description.
+            OutlinedButton(onClick = viewModel::markTrackChange, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text(if (trackMarks > 0) "MARK TRACK  ·  $trackMarks" else "MARK TRACK")
+            }
+        }
+        }
+    }
+    // Power saving replaces the whole workspace: the waveform/meters leave composition (which
+    // also stops the native waveform analyzer) while capture keeps running untouched.
+    val reducedMotion = rememberReducedMotion()
+    AnimatedContent(
+        targetState = powerSave,
+        transitionSpec = { DjmRecMotion.fadeTransform(reduced = reducedMotion) },
+        label = "powerSave"
+    ) { powerSaveOn ->
+    if (powerSaveOn) {
+        PowerSaveOverlay(
+            recording = active,
+            saving = saving,
+            elapsedMillis = elapsed,
+            onStop = {
+                if (confirmStop) stopPrompt = true
+                else { powerSave = false; viewModel.stopRecording() }
+            },
+            onClose = { powerSave = false }
+        )
+    } else BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        if (maxWidth >= 600.dp && maxWidth > maxHeight) {
+            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.weight(1.2f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    inputHeader()
+                    Box(Modifier.weight(1f)) { signalPanel() }
+                }
+                Column(Modifier.weight(1f).align(Alignment.CenterVertically)) { transport(true) }
+            }
+        } else {
+            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                inputHeader()
+                Box(Modifier.weight(1f)) { signalPanel() }
+                transport(false)
+            }
+        }
+    }
+    }
+    saved?.let { recording ->
+        AlertDialog(onDismissRequest = viewModel::dismissSavedRecording,
+            title = { Text(if (recording.notice != null) "Recording stopped" else "Set saved") },
             text = {
-                Text(
-                    "The phone must act as USB host. Enable OTG under Connected devices, then rescan from USB Settings."
-                )
+                Text(listOfNotNull(recording.notice,
+                    "${recording.name}\n${elapsedText(recording.durationMillis)} / Music/DJMRec",
+                    recording.alsoSaved?.let { "MP3 copy: $it" }).joinToString("\n\n"))
             },
-            confirmButton = {
-                TextButton(onClick = { viewModel.openOtgSettings(context) }) {
-                    Text("Open OTG settings")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::dismissOtgWarning) { Text("Dismiss") }
-            }
-        )
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Column(
-            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            SignalSection(
-                state = recordingState,
-                bins = waveformBins,
-                showWaveform = waveformEnabled,
-                levels = levels,
-                gainDb = gainDb,
-                onGainChanged = viewModel::setGainDb,
-                monitoringEnabled = monitoringEnabled,
-                onMonitoringChanged = viewModel::setMonitoringEnabled
-            )
-
-            if (lowStorageWarning) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    shape = NfPanelShape,
-                    border = BorderStroke(1.dp, com.audiopro.djmrec.ui.theme.AccentAmber),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "Low storage -- less than 500 MB free. Free up space or this take may run out of room.",
-                        color = com.audiopro.djmrec.ui.theme.AccentAmber,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(16.dp)
-                    )
-                }
-            }
-
-            if (recordingState is RecordingState.Error) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = NfPanelShape,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = (recordingState as RecordingState.Error).message,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.padding(16.dp)
-                    )
-                }
-            }
-
-            RecordingSetupSection(
-                selectedFormat = selectedFormat,
-                formats = viewModel.availableFormats,
-                formatEnabled = recordingState is RecordingState.Idle ||
-                    recordingState is RecordingState.Monitoring ||
-                    recordingState is RecordingState.Error,
-                onFormatSelected = viewModel::selectFormat,
-                device = device,
-                onRescan = viewModel::rescanUsbDevices,
-                channelOffset = usbChannelOffset,
-                onChannelOffsetSelected = viewModel::setUsbChannelOffset,
-                maxFileSizeMb = maxFileSizeMb,
-                onMaxFileSizeSelected = viewModel::setMaxFileSizeMb
-            )
-        }
-
-        TransportSection(
-            state = recordingState,
-            elapsedMillis = elapsedMillis,
-            trackMarkCount = trackMarkCount,
-            onMark = viewModel::markTrackChange,
-            onRecord = viewModel::startRecording,
-            onPause = viewModel::pauseRecording,
-            onResume = viewModel::resumeRecording,
-            onStop = viewModel::stopRecording
-        )
+            confirmButton = { TextButton(onClick = { viewModel.dismissSavedRecording(); onOpenLibrary() }) { Text("Open sets") } },
+            dismissButton = { TextButton(onClick = viewModel::dismissSavedRecording) { Text("Done") } })
     }
 }
 
 @Composable
-private fun SignalSection(
-    state: RecordingState,
-    bins: FloatArray,
-    showWaveform: Boolean,
-    levels: com.audiopro.djmrec.audio.StereoLevels,
-    gainDb: Float,
-    onGainChanged: (Float) -> Unit,
-    monitoringEnabled: Boolean,
-    onMonitoringChanged: (Boolean) -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        shape = NfPanelShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        "LIVE INPUT",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        if (showWaveform) "Live waveform" else "Input monitoring",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                }
-                StatePill(state)
+internal fun RecordingSetupControls(viewModel: MainViewModel) {
+    val live by viewModel.liveStreamState.collectAsState()
+    val device by viewModel.deviceState.collectAsState()
+    val state by viewModel.recordingState.collectAsState()
+    val saving by viewModel.saving.collectAsState()
+    val format by viewModel.selectedFormat.collectAsState()
+    val gain by viewModel.recordingGainDb.collectAsState()
+    val pair by viewModel.usbChannelOffset.collectAsState()
+    val enabled = !saving && !live.isActive && (state is RecordingState.Idle || state is RecordingState.Monitoring || state is RecordingState.Error)
+    val monitoring by viewModel.monitoringEnabled.collectAsState()
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Listen live", style = MaterialTheme.typography.bodyMedium)
+            Text("Hear the input on headphones/BT to judge gain and crackle. Plays out loud if nothing is connected.",
+                style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+        }
+        Switch(monitoring, viewModel::setMonitoringEnabled)
+    }
+    if (!enabled) Text("Capture settings locked while recording or streaming.", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+    Text("File format", style = MaterialTheme.typography.titleSmall)
+    FormatSelector(format, viewModel.availableFormats, enabled, viewModel::selectFormat)
+    if (format != RecordingFormat.MP3) {
+        val mp3Copy by viewModel.mp3Copy.collectAsState()
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Also save an MP3 copy", style = MaterialTheme.typography.bodyMedium)
+                Text("320 kbps, ready to share while the ${format.name} master stays lossless.",
+                    style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             }
-
-            if (showWaveform) {
-                RgbWaveform(bins = bins)
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-            }
-            Text(
-                "INPUT LEVELS",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            StereoVuMeter(levels = levels)
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "INPUT GAIN",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    if (gainDb == 0f) "0 dB" else "%+.1f dB".format(gainDb),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Slider(
-                value = gainDb,
-                onValueChange = onGainChanged,
-                valueRange = MainViewModel.GAIN_DB_MIN..MainViewModel.GAIN_DB_MAX,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        "LISTEN LIVE",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        "Headphones/BT -- plays out loud if none connected",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
-                Switch(checked = monitoringEnabled, onCheckedChange = onMonitoringChanged)
-            }
+            Switch(mp3Copy, viewModel::setMp3Copy, enabled = enabled)
         }
     }
-}
-
-@Composable
-private fun StatePill(state: RecordingState) {
-    val (label, color) = when (state) {
-        is RecordingState.Recording -> "RECORDING" to AccentRed
-        is RecordingState.Paused -> "PAUSED" to MaterialTheme.colorScheme.secondary
-        is RecordingState.Monitoring -> "SIGNAL READY" to AccentGreen
-        is RecordingState.Preparing -> "CONNECTING" to MaterialTheme.colorScheme.secondary
-        is RecordingState.Error -> "CHECK SETUP" to MaterialTheme.colorScheme.error
-        is RecordingState.Idle -> "STANDBY" to MaterialTheme.colorScheme.onSurfaceVariant
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("Gain: ${if (gain > 0) "+" else ""}$gain dB", modifier = Modifier.weight(1f))
+        TextButton(onClick = { viewModel.setRecordingGainDb(0) }, enabled = enabled) { Text("Reset to 0 dB") }
     }
-    Surface(
-        color = color.copy(alpha = 0.08f),
-        shape = NfBadgeShape,
-        border = BorderStroke(1.dp, color)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Box(Modifier.size(6.dp).background(color, CircleShape))
-            Text(label, style = MaterialTheme.typography.labelSmall, color = color)
-        }
+    Slider(gain.toFloat(), { viewModel.setRecordingGainDb(it.toInt()) }, enabled = enabled,
+        valueRange = 0f..12f, steps = 11, modifier = Modifier.semantics { contentDescription = "Recording gain in decibels" })
+    Text("0 dB preserves input level. Keep peaks below 0 dBFS.", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+    if (device?.requiresIsoCapture == true) {
+        Text("Stereo input pair", style = MaterialTheme.typography.titleSmall)
+        ChannelPairSelector(pair, device!!.channelCount / 2, enabled, viewModel::setUsbChannelOffset)
+        Text(device?.allInOneProfile?.recordChannelOffset?.let { "Auto: master return on USB ${it + 1}/${it + 2}." }
+            ?: if (device?.pioneerMixerProfile == null) "Auto uses USB 1/2. Choose another pair to audition it before recording."
+            else "Auto locks an audible pair; S11 uses dedicated REC OUT. Selection is remembered per mixer.",
+            style = MaterialTheme.typography.bodySmall, color = TextSecondary)
     }
 }
 
-@Composable
-private fun TransportSection(
-    state: RecordingState,
-    elapsedMillis: Long,
-    trackMarkCount: Int,
-    onMark: () -> Unit,
-    onRecord: () -> Unit,
-    onPause: () -> Unit,
-    onResume: () -> Unit,
-    onStop: () -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        RecordingTimer(
-            elapsedMillis = elapsedMillis,
-            active = state is RecordingState.Recording,
-            paused = state is RecordingState.Paused
-        )
-        TransportControls(
-            state = state,
-            onRecord = onRecord,
-            onPause = onPause,
-            onResume = onResume,
-            onStop = onStop
-        )
-        if (state is RecordingState.Recording) {
-            OutlinedButton(
-                onClick = onMark,
-                shape = RoundedCornerShape(3.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-            ) {
-                Text(
-                    if (trackMarkCount > 0) "MARK TRACK ($trackMarkCount)" else "MARK TRACK",
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-        }
-        Text(
-            text = when (state) {
-                is RecordingState.Recording -> "Recording to Music/DJMRec"
-                is RecordingState.Paused -> "Recording paused"
-                is RecordingState.Preparing -> "Opening USB audio stream..."
-                is RecordingState.Monitoring -> "Press record when ready"
-                else -> "Connect mixer and press record"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun RecordingSetupSection(
-    selectedFormat: com.audiopro.djmrec.audio.RecordingFormat,
-    formats: List<com.audiopro.djmrec.audio.RecordingFormat>,
-    formatEnabled: Boolean,
-    onFormatSelected: (com.audiopro.djmrec.audio.RecordingFormat) -> Unit,
-    device: com.audiopro.djmrec.usb.UsbAudioDeviceInfo?,
-    onRescan: () -> Unit,
-    channelOffset: Int,
-    onChannelOffsetSelected: (Int) -> Unit,
-    maxFileSizeMb: Int,
-    onMaxFileSizeSelected: (Int) -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        shape = NfPanelShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Column {
-                Text(
-                    "RECORDING SETUP",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Text("File format", style = MaterialTheme.typography.titleMedium)
-            }
-            FormatSelector(
-                selected = selectedFormat,
-                formats = formats,
-                enabled = formatEnabled,
-                onSelect = onFormatSelected
-            )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-            Text(
-                "AUDIO SOURCE",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            DeviceStatusCard(device = device, onRescan = onRescan)
-            if (device != null && device.channelCount > 2) {
-                Text(
-                    "USB CHANNEL PAIR",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                ChannelPairSelector(
-                    selectedOffset = channelOffset,
-                    pairCount = device.channelCount / 2,
-                    enabled = formatEnabled,
-                    onSelect = onChannelOffsetSelected
-                )
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
-            Text(
-                "MAX FILE SIZE",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            MaxFileSizeSelector(
-                selectedMb = maxFileSizeMb,
-                enabled = true,
-                onSelect = onMaxFileSizeSelected
-            )
-        }
-    }
-}
-
-@Composable
-private fun RecordingTimer(elapsedMillis: Long, active: Boolean, paused: Boolean) {
-    val infiniteTransition = rememberInfiniteTransition(label = "recordingPulse")
-    val dotAlpha by infiniteTransition.animateFloat(
-        initialValue = if (active) 0.32f else 0.55f,
-        targetValue = if (active) 1f else 0.55f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-        label = "recordingDot"
-    )
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(
-            Modifier.size(12.dp).alpha(dotAlpha).background(
-                if (active || paused) AccentRed else MaterialTheme.colorScheme.outline,
-                CircleShape
-            )
-        )
-        Text(
-            formatElapsed(elapsedMillis),
-            style = NfReadout
-        )
-    }
-}
-
-private fun formatElapsed(millis: Long): String {
-    val totalSeconds = millis / 1000
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    return if (hours > 0) String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
-    else String.format(Locale.US, "%02d:%02d", minutes, seconds)
+internal fun elapsedText(millis: Long): String {
+    val seconds = millis.coerceAtLeast(0) / 1000
+    return String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
