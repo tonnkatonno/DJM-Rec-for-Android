@@ -49,9 +49,7 @@ fun RgbWaveform(bins: FloatArray, modifier: Modifier = Modifier, smooth: Boolean
         for (i in 0 until 512) {
             val base = i * 4
             for (band in 0..2) {
-                val value = bins.getOrElse(base + 1 + band) { 0f }
-                bandHeights[band][i] =
-                    sqrt(if (value.isFinite()) value.coerceIn(0f, 1f) else 0f)
+                bandHeights[band][i] = waveformBandHeight(bins.getOrElse(base + 1 + band) { 0f })
             }
         }
         cache.invalidate()
@@ -91,6 +89,17 @@ fun RgbWaveform(bins: FloatArray, modifier: Modifier = Modifier, smooth: Boolean
         }
     }
 }
+
+/**
+ * The analyzer reports each band's mean |x|, and a full-scale tone averages only 2/pi (0.64) of
+ * its peak, so drawn as-is even a 0 dBFS bass line stopped at ~73 % of the strip. This maps that
+ * full-scale average to the top of the strip (the 0.91 headroom is applied when paths are built).
+ */
+private const val WAVEFORM_DISPLAY_GAIN = 1.6f
+
+/** Drawn height of one band, 0..1 of the half-strip, from the analyzer's mean |x| for the bin. */
+internal fun waveformBandHeight(meanAbs: Float): Float =
+    sqrt(if (meanAbs.isFinite()) (meanAbs * WAVEFORM_DISPLAY_GAIN).coerceIn(0f, 1f) else 0f)
 
 /**
  * Holds the three band envelopes in bin space (x = binIndex * step). Rebuilt on data
