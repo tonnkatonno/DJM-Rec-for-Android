@@ -43,10 +43,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.audiopro.djmrec.audio.RecordingGain
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.streaming.LivePlatform
 import com.audiopro.djmrec.streaming.LiveStreamStatus
 import com.audiopro.djmrec.streaming.YouTubeBroadcastStatus
+import com.audiopro.djmrec.ui.components.GainSlider
 import com.audiopro.djmrec.ui.components.StereoVuMeter
 import com.audiopro.djmrec.ui.theme.AccentAmber
 import com.audiopro.djmrec.ui.theme.AccentRed
@@ -278,12 +280,10 @@ fun CameraLiveScreen(viewModel: MainViewModel) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Keep screen awake"); Switch(awake, { awake = it })
             }
-            Text("Mixer gain: ${if (gain > 0) "+" else ""}$gain dB")
-            Slider(value = gain.toFloat(), onValueChange = { viewModel.setRecordingGainDb(it.roundToInt()) },
-                valueRange = 0f..12f, steps = 11,
-                enabled = recording is RecordingState.Monitoring && !saving)
-            Text(if (recording is RecordingState.Monitoring) "Gain changes the audio sent to viewers. Watch for clipping."
-                else "Gain is locked while recording or saving a set.", style = MaterialTheme.typography.bodySmall)
+            Text("Mixer gain: ${RecordingGain.label(gain)}")
+            GainSlider(gain, viewModel::setRecordingGainDb, enabled = !saving)
+            Text(if (saving) "Gain is locked while saving a set."
+                else "Gain changes the audio sent to viewers. Watch for clipping.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

@@ -40,7 +40,8 @@ research live on the separate
 3. Play audio and check both meters; automatic arming starts monitoring, not recording.
 4. Press **Record**, then **Save set** when finished. Files appear in **Sets** and `Music/DJMRec`.
 
-Format, gain and USB channel pair are in **Recording setup** (0 dB gain keeps the input level).
+The **Input gain** slider (-24 to +24 dB, +12 dB by default, 0 dB keeps the input level) sits under the
+meters and can be moved during a set. Format and USB channel pair are in **Recording setup**.
 Keep USB connected during a set: force-stop, reboot or cable loss ends capture.
 
 ## Features

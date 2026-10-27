@@ -17,6 +17,7 @@ import com.audiopro.djmrec.DjmRecApplication
 import com.audiopro.djmrec.audio.AudioEngine
 import com.audiopro.djmrec.audio.ChannelLevel
 import com.audiopro.djmrec.audio.RecordingFormat
+import com.audiopro.djmrec.audio.RecordingGain
 import com.audiopro.djmrec.audio.RecordingHealth
 import com.audiopro.djmrec.audio.RecordingState
 import com.audiopro.djmrec.audio.StereoLevels
@@ -233,8 +234,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val waveformEnabled: StateFlow<Boolean> = _waveformEnabled.asStateFlow()
 
-    // Gain range 0..+12 dB with +12 as the default (per product decision).
-    private val _recordingGainDb = MutableStateFlow(prefs.getInt("recording_gain_db", 12).coerceIn(0, 12))
+    // Manual gain in whole dB, -24..+24 with +12 as the default.
+    private val _recordingGainDb = MutableStateFlow(
+        RecordingGain.clamp(prefs.getInt("recording_gain_db", RecordingGain.DEFAULT_DB)))
     val recordingGainDb: StateFlow<Int> = _recordingGainDb.asStateFlow()
 
     // FLAC by default: lossless like WAV at roughly half the size -- faster Drive/SoundCloud
@@ -362,12 +364,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Live control: allowed mid-take too (the level steps in the file from that point on).
     fun setRecordingGainDb(gainDb: Int) {
         if (saving.value) return
-        if (_recordingState.value is RecordingState.Recording ||
-            _recordingState.value is RecordingState.Paused ||
-            _recordingState.value is RecordingState.Preparing) return
-        val value = gainDb.coerceIn(0, 12)
+        val value = RecordingGain.clamp(gainDb)
+        if (value == _recordingGainDb.value) return
         _recordingGainDb.value = value
         prefs.edit().putInt("recording_gain_db", value).apply()
         boundService?.setRecordingGainDb(value)

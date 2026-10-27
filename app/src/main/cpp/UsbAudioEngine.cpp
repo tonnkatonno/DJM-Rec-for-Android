@@ -985,7 +985,8 @@ bool UsbAudioEngine::isAwaitingAudio() const {
 } // namespace djmrec
 
 void djmrec::UsbAudioEngine::setRecordingGainDb(int gainDb) {
-    mRecordingGainLinear.store(std::pow(10.0f, std::clamp(gainDb, -12, 24) / 20.0f),
+    // Same range as the UI slider (RecordingGain.MIN_DB..MAX_DB).
+    mRecordingGainLinear.store(std::pow(10.0f, std::clamp(gainDb, -24, 24) / 20.0f),
                                std::memory_order_relaxed);
 }
 

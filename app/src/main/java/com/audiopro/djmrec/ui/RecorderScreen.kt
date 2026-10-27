@@ -18,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -108,6 +107,8 @@ fun RecorderScreen(viewModel: MainViewModel, onOpenLibrary: () -> Unit = {}) {
         Surface(Modifier.fillMaxSize(), shape = RoundedCornerShape(4.dp), color = SurfaceDark) {
             BoxWithConstraints(Modifier.padding(12.dp)) {
                 val compact = maxHeight < 160.dp
+                // Below this the gain control folds into one row so the waveform keeps some room.
+                val tight = maxHeight < 260.dp
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically) {
@@ -130,6 +131,9 @@ fun RecorderScreen(viewModel: MainViewModel, onOpenLibrary: () -> Unit = {}) {
                         active = state is RecordingState.Monitoring || active, onVisible = viewModel::setWaveformVisible)
                     else if (!compact) Spacer(Modifier.weight(1f))
                     StereoVuMeter(levels)
+                    // Live gain sits right under the meters.
+                    if (!tight) HorizontalDivider(color = BorderHairline)
+                    InputGainControl(gain, viewModel::setRecordingGainDb, singleRow = tight, enabled = !saving)
                 }
             }
         }
@@ -291,11 +295,11 @@ internal fun RecordingSetupControls(viewModel: MainViewModel) {
         }
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("Gain: ${if (gain > 0) "+" else ""}$gain dB", modifier = Modifier.weight(1f))
-        TextButton(onClick = { viewModel.setRecordingGainDb(0) }, enabled = enabled) { Text("Reset to 0 dB") }
+        Text("Gain: ${RecordingGain.label(gain)}", modifier = Modifier.weight(1f))
+        TextButton(onClick = { viewModel.setRecordingGainDb(0) }, enabled = !saving) { Text("Reset to 0 dB") }
     }
-    Slider(gain.toFloat(), { viewModel.setRecordingGainDb(it.toInt()) }, enabled = enabled,
-        valueRange = 0f..12f, steps = 11, modifier = Modifier.semantics { contentDescription = "Recording gain in decibels" })
+    // Unlike the format and channel pair around it, gain stays adjustable mid-take.
+    GainSlider(gain, viewModel::setRecordingGainDb, enabled = !saving)
     Text("0 dB preserves input level. Keep peaks below 0 dBFS.", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
     if (device?.requiresIsoCapture == true) {
         Text("Stereo input pair", style = MaterialTheme.typography.titleSmall)
