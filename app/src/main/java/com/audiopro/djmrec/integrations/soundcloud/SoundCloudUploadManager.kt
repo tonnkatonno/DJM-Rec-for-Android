@@ -36,7 +36,8 @@ D⠀◈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀💣💣💣
  */
 object SoundCloudUploadManager {
 
-    enum class Status { QUEUED, UPLOADING, DONE, FAILED }
+    /** PREPARING: a set over the API's ~2 GiB line is being turned into a smaller FLAC copy first ([SoundCloudUploadCopy]). */
+    enum class Status { QUEUED, PREPARING, UPLOADING, DONE, FAILED }
     data class UploadState(
         val status: Status,
         val progress: Float = 0f,

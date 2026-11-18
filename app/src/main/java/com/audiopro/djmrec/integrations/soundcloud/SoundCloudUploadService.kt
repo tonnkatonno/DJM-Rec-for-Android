@@ -126,18 +126,35 @@ class SoundCloudUploadService : Service() {
             return
         }
 
+        var upload: SoundCloudUploadCopy.Prepared? = null
         try {
+            // Over the API's ~2 GiB line the set goes up as a half-sample-rate FLAC copy (see UploadSizePolicy).
+            upload = if (UploadSizePolicy.needsSmallerCopy(file.length())) {
+                val throttle = ProgressThrottle()
+                setState(file, SoundCloudUploadManager.Status.PREPARING, 0f)
+                updateNotification(file.name, 0f, preparing = true)
+                SoundCloudUploadCopy.prepare(applicationContext, file) { progress ->
+                    if (throttle.shouldEmit(progress)) {
+                        setState(file, SoundCloudUploadManager.Status.PREPARING, progress)
+                        updateNotification(file.name, progress, preparing = true)
+                    }
+                }
+            } else {
+                SoundCloudUploadCopy.Prepared(file, temporary = false)
+            }
+            val throttle = ProgressThrottle()
+            setState(file, SoundCloudUploadManager.Status.UPLOADING, 0f)
+            updateNotification(file.name, 0f)
             val trackUrl = SoundCloudUploader.upload(
-                applicationContext, file, title = file.nameWithoutExtension, private = true,
+                applicationContext, upload.file, title = file.nameWithoutExtension, private = true,
                 genre = SoundCloudUploadManager.getDefaultGenre(applicationContext),
                 tags = SoundCloudUploadManager.getDefaultTags(applicationContext),
                 description = buildDescription(file)
             ) { progress ->
-                SoundCloudUploadManager.updateState(
-                    file.absolutePath,
-                    SoundCloudUploadManager.UploadState(SoundCloudUploadManager.Status.UPLOADING, progress)
-                )
-                updateNotification(file.name, progress)
+                if (throttle.shouldEmit(progress)) {
+                    setState(file, SoundCloudUploadManager.Status.UPLOADING, progress)
+                    updateNotification(file.name, progress)
+                }
             }
             SoundCloudUploadManager.markUploaded(applicationContext, file)
             RemoteLinkIndex.recordSoundCloud(applicationContext, file, trackUrl)
@@ -154,7 +171,14 @@ class SoundCloudUploadService : Service() {
                     SoundCloudUploadManager.Status.FAILED, error = e.message ?: "Upload failed"
                 )
             )
+        } finally {
+            val prepared = upload
+            if (prepared != null && prepared.temporary) runCatching { prepared.file.delete() }
         }
+    }
+
+    private fun setState(file: File, status: SoundCloudUploadManager.Status, progress: Float) {
+        SoundCloudUploadManager.updateState(file.absolutePath, SoundCloudUploadManager.UploadState(status, progress))
     }
 
     /** Prepends the take's tracklist (from "MARK TRACK" during recording), if any, to the
@@ -183,16 +207,20 @@ class SoundCloudUploadService : Service() {
         }
     }
 
-    private fun updateNotification(fileName: String, progress: Float) {
-        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(fileName, progress))
+    private fun updateNotification(fileName: String, progress: Float, preparing: Boolean = false) {
+        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(fileName, progress, preparing))
     }
 
-    private fun buildNotification(fileName: String?, progress: Float): Notification {
+    private fun buildNotification(fileName: String?, progress: Float, preparing: Boolean = false): Notification {
         val contentIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val title = if (fileName != null) "Uploading to SoundCloud: $fileName" else "Cloud upload"
+        val title = when {
+            fileName == null -> "Cloud upload"
+            preparing -> "Preparing a smaller copy for SoundCloud: $fileName"
+            else -> "Uploading to SoundCloud: $fileName"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)

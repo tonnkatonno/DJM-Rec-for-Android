@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.45.1 (2026-11-19)
+
+### Cloud upload
+- Upload long sets to SoundCloud again. SoundCloud's upload API refuses files over 2 GiB (HTTP 413), which a
+  96 kHz / 24-bit FLAC passes at about 85 minutes; the upload used to stop with that error part of the way in. A set
+  over the limit is now uploaded as a 48 kHz / 24-bit FLAC copy (88.2 kHz sets go up at 44.1 kHz): still lossless for
+  listening, about half the size, and on the same timeline as the master, so timestamps on SoundCloud match. The copy
+  is made first ("Preparing a smaller copy for SoundCloud") and deleted after the upload; the master is not touched.
+- Say plainly what to do when SoundCloud refuses a file as too large: upload it on soundcloud.com, which takes up to
+  4 GB.
+- Update the upload notification and progress a few times a second at most. They used to update on every 8 KB sent,
+  which made Android drop the updates and the app stutter during a long upload.
+
 ## v0.45.0 (2026-09-27)
 
 ### Recording

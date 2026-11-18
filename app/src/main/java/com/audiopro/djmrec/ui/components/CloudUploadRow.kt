@@ -99,7 +99,8 @@ private fun DriveUploadManager.Status.toChipStatus(): ChipStatus = when (this) {
 }
 
 private fun SoundCloudUploadManager.Status.toChipStatus(): ChipStatus = when (this) {
-    SoundCloudUploadManager.Status.QUEUED, SoundCloudUploadManager.Status.UPLOADING -> ChipStatus.UPLOADING
+    SoundCloudUploadManager.Status.QUEUED, SoundCloudUploadManager.Status.PREPARING,
+    SoundCloudUploadManager.Status.UPLOADING -> ChipStatus.UPLOADING
     SoundCloudUploadManager.Status.DONE -> ChipStatus.DONE
     SoundCloudUploadManager.Status.FAILED -> ChipStatus.FAILED
 }

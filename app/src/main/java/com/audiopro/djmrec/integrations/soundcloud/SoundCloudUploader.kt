@@ -67,6 +67,12 @@ object SoundCloudUploader {
 
         client.newCall(request).execute().use { response ->
             val bodyString = response.body?.string().orEmpty()
+            if (response.code == 413) {
+                throw IOException(
+                    "SoundCloud refused the file as too large (HTTP 413): its upload API takes about 2 GiB. " +
+                        "Upload this set on soundcloud.com instead, which takes up to 4 GB."
+                )
+            }
             if (!response.isSuccessful) {
                 throw IOException("SoundCloud upload failed (HTTP ${response.code}): ${bodyString.take(200)}")
             }
