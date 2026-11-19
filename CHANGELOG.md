@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.45.2 (2026-11-19)
+
+### Cloud upload and set editor
+- Fix the SoundCloud copy of a long set failing at once with "Cannot round NaN value". On newer Android (seen on Android 17)
+  the system's FLAC reader decodes the file itself and hands over 16-, 24- or 32-bit samples; the app asked for float
+  and read those integers as float, which gave noise and NaN. Such audio is now read in the format the system reports.
+  The set editor's FLAC export used the same reader and is fixed too.
+- Stop the SoundCloud copy with a clear message if a recording still does not decode cleanly (samples that are not
+  numbers, or a decoded length that does not match the file), instead of uploading noise. The decoder logs the sample
+  format it gets, so a diagnostics report shows it.
+
 ## v0.45.1 (2026-11-19)
 
 ### Cloud upload

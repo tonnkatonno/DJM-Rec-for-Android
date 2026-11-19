@@ -11,6 +11,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import kotlin.coroutines.coroutineContext
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToLong
 
@@ -96,6 +97,14 @@ internal object SoundCloudUploadCopy {
                     coroutineContext.ensureActive()
                     val frames = decoder.read(src, BLOCK_FRAMES)
                     if (frames <= 0) break
+                    for (i in 0 until frames * decoder.channels) {
+                        if (!src[i].isFinite()) {
+                            throw IOException(
+                                "The recording did not decode cleanly (unexpected sample format), so no SoundCloud copy was " +
+                                    "made. Upload this set on soundcloud.com, which takes up to 4 GB."
+                            )
+                        }
+                    }
                     toStereo(src, decoder.channels, stereo, frames)
                     feed(stereo, frames)
                     if (writeFailed) throw IOException("storage write failed while preparing the SoundCloud copy")
@@ -104,6 +113,13 @@ internal object SoundCloudUploadCopy {
                 }
                 for (i in 0 until stages) decimators[i].finish(downstream[i]!!)     // in order: each tail flows on
                 if (writeFailed) throw IOException("storage write failed while preparing the SoundCloud copy")
+                // Samples read in the wrong format change the frame count (24-bit read as 16-bit: 1.5x): never upload that.
+                if (totalFrames != null && abs(position - totalFrames) > max(4_096L, totalFrames / 1_000)) {
+                    throw IOException(
+                        "The recording was not read correctly ($position frames decoded, the file holds $totalFrames), so no " +
+                            "SoundCloud copy was made. Upload this set on soundcloud.com, which takes up to 4 GB."
+                    )
+                }
                 handleOpen = false
                 if (!NativeAudioFileWriter.close(handle)) throw IOException("could not finalize the SoundCloud copy")
                 onProgress(1f)

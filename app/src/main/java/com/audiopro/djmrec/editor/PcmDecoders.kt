@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.FileInputStream
@@ -159,20 +160,24 @@ internal class WavPcmDecoder(
     }
 }
 
-/** FLAC/MP3 through Android's decoders, asking for float output to keep 24-bit detail. */
+/**
+ * FLAC/MP3 through Android's decoders, asking a real decoder for float output to keep 24-bit detail. Newer Android decodes
+ * FLAC inside the extractor and hands over "audio/raw": that passes through the raw codec unchanged, so it is read in the
+ * encoding the extractor reports (asking for float there only relabels integer samples, see [PcmSamples]).
+ */
 internal class MediaCodecPcmDecoder(context: Context, uri: Uri, override val bitsPerSample: Int) : PcmDecoder {
     private val extractor = MediaExtractor()
     override var sampleRate: Int = 0
         private set
     override var channels: Int = 0
         private set
+    private var outputEncoding = AudioFormat.ENCODING_PCM_16BIT
     private val codec: MediaCodec = try {
         startDecoder(context, uri)
     } catch (error: Throwable) {
         runCatching { extractor.release() }
         throw error
     }
-    private var floatOutput = false
     private var inputDone = false
     private var outputDone = false
     private var pending = DoubleArray(0)
@@ -189,9 +194,18 @@ internal class MediaCodecPcmDecoder(context: Context, uri: Uri, override val bit
         val format = extractor.getTrackFormat(track)
         sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
         channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-        // Float keeps 24-bit FLAC detail; decoders that ignore it report 16-bit output instead.
-        format.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_FLOAT)
-        val decoder = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME) ?: throw IOException("Unknown audio type"))
+        val mime = format.getString(MediaFormat.KEY_MIME) ?: throw IOException("Unknown audio type")
+        if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
+            // Already decoded by the extractor: its samples pass through as they are, in the encoding it reports.
+            outputEncoding = pcmEncodingOf(format)
+            PcmSamples.bytesPerSample(outputEncoding)                     // fail early on an encoding we cannot read
+        } else {
+            // Float keeps 24-bit FLAC detail; decoders that ignore it report 16-bit output instead.
+            format.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_FLOAT)
+        }
+        Log.i("PcmDecoder", "track $mime ${sampleRate} Hz, $channels ch, raw pcm-encoding=" +
+            (if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) outputEncoding.toString() else "decoder asked for float"))
+        val decoder = MediaCodec.createDecoderByType(mime)
         try {
             decoder.configure(format, null, null, 0)
             decoder.start()
@@ -233,22 +247,17 @@ internal class MediaCodecPcmDecoder(context: Context, uri: Uri, override val bit
                 val format = codec.outputFormat
                 sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                 channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                floatOutput = format.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
-                    format.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
+                outputEncoding = pcmEncodingOf(format)
+                Log.i("PcmDecoder", "output ${sampleRate} Hz, $channels ch, pcm-encoding=$outputEncoding")
             }
             outputIndex >= 0 -> {
                 val buffer = codec.getOutputBuffer(outputIndex)!!.order(ByteOrder.LITTLE_ENDIAN)
                 buffer.position(info.offset)
                 buffer.limit(info.offset + info.size)
-                val samples = if (floatOutput) info.size / 4 else info.size / 2
+                val samples = info.size / PcmSamples.bytesPerSample(outputEncoding)
                 compactPending(samples)
-                if (floatOutput) {
-                    val floats = buffer.asFloatBuffer()
-                    for (i in 0 until samples) pending[pendingEnd++] = floats.get(i).toDouble()
-                } else {
-                    val shorts = buffer.asShortBuffer()
-                    for (i in 0 until samples) pending[pendingEnd++] = shorts.get(i) / 32768.0
-                }
+                PcmSamples.read(buffer, samples, outputEncoding, pending, pendingEnd)
+                pendingEnd += samples
                 codec.releaseOutputBuffer(outputIndex, false)
                 if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true
             }
@@ -274,5 +283,10 @@ internal class MediaCodecPcmDecoder(context: Context, uri: Uri, override val bit
 
     private companion object {
         const val TIMEOUT_US = 10_000L
+
+        /** The format's PCM encoding; a format without one means 16-bit (Android's default). */
+        fun pcmEncodingOf(format: MediaFormat): Int =
+            if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) format.getInteger(MediaFormat.KEY_PCM_ENCODING)
+            else AudioFormat.ENCODING_PCM_16BIT
     }
 }
