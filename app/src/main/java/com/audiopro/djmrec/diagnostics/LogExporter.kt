@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import com.audiopro.djmrec.BuildConfig
 import com.audiopro.djmrec.audio.AudioEngine
+import com.audiopro.djmrec.blind.BlindGradeStore
 import com.audiopro.djmrec.storage.RecordingOutputManager
 import com.audiopro.djmrec.storage.RecordingSessionStore
 import java.io.BufferedReader
@@ -49,6 +50,10 @@ object LogExporter {
         sb.appendLine("device: ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT})")
         sb.appendLine("hardware: ${Build.HARDWARE} board=${Build.BOARD} supportedAbis=${Build.SUPPORTED_ABIS.toList()}")
         sb.appendLine()
+
+        // Near the top, so the grades given in the car are easy to find when the report is sent back.
+        runCatching { BlindGradeStore.appendReport(context, sb) }
+            .onFailure { sb.appendLine("=== Blind grades: unavailable (${it.javaClass.simpleName}) ===").appendLine() }
 
         val nativeSummary = AudioEngine.getDiagnosticSummary()
         appendUsbSection(context, sb)

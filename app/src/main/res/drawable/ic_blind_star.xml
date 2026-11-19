@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Blind grading (Android Auto custom action): nagyon jó (★). Generated; "_on" = the grade in effect (ringed). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M12.00,5.00 L13.88,10.01 L19.23,10.25 L15.04,13.59 L16.47,18.75 L12.00,15.80 L7.53,18.75 L8.96,13.59 L4.77,10.25 L10.12,10.01 Z" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" />
+</vector>

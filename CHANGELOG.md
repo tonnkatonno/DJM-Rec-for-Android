@@ -1,6 +1,18 @@
 # Changelog
 
-## v0.45.2 (2026-11-19)
+## v0.45.3 (2026-11-19)
+
+### Android Auto: blind grading of a recording
+- DJM-Rec is now an Android Auto media app. It plays a recording that has a blind list (the moments the
+  double_possiblity_searcher picked from the set, without telling its prediction) from Music/DJMRec, and lets you
+  grade each moment from the car screen: ✗ dissonant, ~ neutral, ✓ harmonious, ★ really good.
+- Between moments the bar has ⏮ / ⏭: the moment before, or the next ungraded one, 4 s before it starts. Inside a moment,
+  from that lead-in until 6 s after it ends, the four grade buttons take their place; the grade in effect is ringed, and
+  the same button again clears it. The steering wheel's next / previous always jump between moments. A "Pillanatok"
+  folder lists every moment to start from.
+- Grades already given in the SoundCloud extension come with the list, so the car continues with the rest. The car's
+  grades are kept in the app and listed at the top of the diagnostic report.
+- A sideloaded app appears in Android Auto only with "Unknown sources" on in Android Auto's developer settings.
 
 ### Cloud upload and set editor
 - Fix the SoundCloud copy of a long set failing at once with "Cannot round NaN value". On newer Android (seen on Android 17)

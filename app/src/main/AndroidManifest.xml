@@ -95,6 +95,13 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="djmrec" />
             </intent-filter>
+
+            <!-- Android Auto media apps take voice requests ("play … on DJM-Rec"); in the car they reach
+                 blind.BlindAutoService's session (onPlayFromSearch), on the phone they just open the app. -->
+            <intent-filter>
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <service
@@ -112,6 +119,19 @@
             android:name=".integrations.soundcloud.SoundCloudUploadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Android Auto: blind grading of a recording's moments while listening in the car (blind/BlindAutoService).
+             A sideloaded app shows up in Android Auto only with its developer setting "Unknown sources" on. -->
+        <service
+            android:name=".blind.BlindAutoService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
