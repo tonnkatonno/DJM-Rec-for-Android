@@ -70,6 +70,9 @@ android {
         // is 64-bit ARM. Keeping a single ABI keeps the native audio path easy to validate.
         ndk {
             abiFilters += listOf("arm64-v8a")
+            // `-PextraAbis=x86_64`: also for a PC emulator (e.g. Android Automotive, to try the Android Auto media service).
+            (project.findProperty("extraAbis") as String?)?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)
+                ?.let { abiFilters += it }
         }
 
         externalNativeBuild {

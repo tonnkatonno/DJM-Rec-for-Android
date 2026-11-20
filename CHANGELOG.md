@@ -1,6 +1,17 @@
 # Changelog
 
-## v0.45.3 (2026-11-19)
+## v0.45.4 (2026-11-20)
+
+### Android Auto blind grading, after a run on the Android Automotive emulator
+- The browse root now holds one folder per recording. Car hosts show the root's folders as tabs and dropped the
+  playable item that was there; in the folder, "▶ Folytatás" (start at the first ungraded moment) comes first, then
+  every moment in the order they are heard.
+- The grade buttons read ✗ ~ ⏸ ✓ ★ on the car screen, worst to best (the car fills the free slots next to play first,
+  then the outer ones).
+- Every media browser gets the lists: Android Automotive's media centre was not on the allow-list of hosts.
+- The car shows the recording's name and progress as soon as it connects, instead of an empty "now playing" screen.
+- A clearer message on the car screen when the recording cannot be opened.
+- Build option `-PextraAbis=x86_64` adds x86_64 native code, for trying the app on a PC emulator.
 
 ### Android Auto: blind grading of a recording
 - DJM-Rec is now an Android Auto media app. It plays a recording that has a blind list (the moments the

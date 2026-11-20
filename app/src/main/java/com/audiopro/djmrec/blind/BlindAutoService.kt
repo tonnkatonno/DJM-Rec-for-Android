@@ -19,7 +19,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.Process
 import android.os.SystemClock
 import android.service.media.MediaBrowserService
 import android.util.Log
@@ -77,6 +76,17 @@ class BlindAutoService : MediaBrowserService() {
         }
         sessionToken = session.sessionToken
         publishState()
+        // Show the last list's name and progress at once, instead of an empty "now playing" screen until ▶ is pressed.
+        val list = lastList() ?: return
+        io.execute {
+            val graded = BlindGradeStore.load(this, list)
+            main.post {
+                if (!destroyed && blind == null) {
+                    blind = graded
+                    publishState()
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -92,17 +102,15 @@ class BlindAutoService : MediaBrowserService() {
 
     // --- browsing -------------------------------------------------------------------------------------
 
+    // Every caller gets the lists. An allow-list of hosts turned out too narrow (Android Automotive's media centre is
+    // com.android.car.media, not Android Auto), and nothing here is private: the moments and track names of a set,
+    // plus play / pause of a recording that any app with audio access can read anyway.
     override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): MediaBrowserService.BrowserRoot {
-        val trusted = clientUid == Process.myUid() || clientUid == Process.SYSTEM_UID || clientPackageName in TRUSTED_CALLERS
-        Log.i(TAG, "browser connected: $clientPackageName (trusted=$trusted)")
-        return MediaBrowserService.BrowserRoot(if (trusted) ROOT_ID else EMPTY_ROOT_ID, null)
+        Log.i(TAG, "browser connected: $clientPackageName (uid $clientUid)")
+        return MediaBrowserService.BrowserRoot(ROOT_ID, null)
     }
 
     override fun onLoadChildren(parentId: String, result: MediaBrowserService.Result<MutableList<MediaBrowser.MediaItem>>) {
-        if (parentId == EMPTY_ROOT_ID) {
-            result.sendResult(mutableListOf())
-            return
-        }
         result.detach()
         io.execute {
             val items = runCatching { children(parentId) }
@@ -112,26 +120,30 @@ class BlindAutoService : MediaBrowserService() {
         }
     }
 
-    /** Runs on [io]: it looks the recordings up in MediaStore. */
+    /**
+     * Runs on [io]: it looks the recordings up in MediaStore. The root holds one folder per list, because cars show the
+     * root's folders as tabs and drop playable items there (seen on the Android Automotive emulator). In the folder:
+     * "▶ Folytatás" (start at the first ungraded moment), then every moment in the order they are heard.
+     */
     private fun children(parentId: String): List<MediaBrowser.MediaItem> {
         if (parentId == ROOT_ID) {
-            return BlindLists.all.flatMap { list ->
+            return BlindLists.all.map { list ->
                 val graded = BlindGradeStore.load(this, list)
                 val found = BlindRecordings.find(this, list) != null
-                listOf(
-                    item(
-                        listMediaId(list), list.title,
-                        if (found) "${graded.done}/${graded.total} értékelve · az első értékeletlennél indul"
-                        else "Nincs a telefonon: Music/DJMRec/${list.match}",
-                        playable = true,
-                    ),
-                    item(listMediaId(list) + MOMENTS_SUFFIX, "Pillanatok (${list.moments.size})", "Ugrás egy adott pillanatra", playable = false),
-                )
+                item(listMediaId(list) + MOMENTS_SUFFIX, list.title, if (found) "${graded.done}/${graded.total} értékelve" else missing(list), playable = false)
             }
         }
         val list = listFor(parentId.removeSuffix(MOMENTS_SUFFIX))?.takeIf { parentId.endsWith(MOMENTS_SUFFIX) } ?: return emptyList()
         val graded = BlindGradeStore.load(this, list)
-        return list.moments.sortedBy { it.start }.map { m ->
+        val found = BlindRecordings.find(this, list) != null
+        val first = graded.firstTarget()
+        val start = item(
+            listMediaId(list),
+            "▶ Folytatás" + (first?.let { ": #${it.n}  ${it.from}–${it.to}" } ?: ""),
+            if (found) "az első értékeletlen pillanattól · ${graded.done}/${graded.total} értékelve" else missing(list),
+            playable = true,
+        )
+        return listOf(start) + list.moments.sortedBy { it.start }.map { m ->
             val grade = graded.gradeOf(m.n)
             item(
                 "${listMediaId(list)}/${m.n}", "#${m.n}  ${m.from}–${m.to}",
@@ -140,6 +152,8 @@ class BlindAutoService : MediaBrowserService() {
             )
         }
     }
+
+    private fun missing(list: BlindList) = "Nincs a telefonon: Music/DJMRec/${list.match}"
 
     private fun item(id: String, title: String, subtitle: String, playable: Boolean) = MediaBrowser.MediaItem(
         MediaDescription.Builder().setMediaId(id).setTitle(title).setSubtitle(subtitle).build(),
@@ -184,9 +198,12 @@ class BlindAutoService : MediaBrowserService() {
     /** Play: continue the current player, else where the last session stopped, else the first list from its start. */
     private fun resume() {
         if (player != null) return play()
-        val list = BlindLists.all.firstOrNull { it.id == prefs.getString(KEY_LIST, null) } ?: BlindLists.all.firstOrNull() ?: return
+        val list = lastList() ?: return
         start(list, moment = null, atMs = prefs.getLong(KEY_POSITION + list.id, -1L).takeIf { it >= 0 })
     }
+
+    private fun lastList(): BlindList? =
+        BlindLists.all.firstOrNull { it.id == prefs.getString(KEY_LIST, null) } ?: BlindLists.all.firstOrNull()
 
     /** Opens [list]'s recording at moment [moment], or at [atMs], or at the first ungraded moment. */
     private fun start(list: BlindList, moment: Int?, atMs: Long?) {
@@ -242,8 +259,8 @@ class BlindAutoService : MediaBrowserService() {
             mp.setDataSource(applicationContext, rec.uri)
             mp.prepareAsync()
         } catch (e: Exception) {
-            Log.e(TAG, "cannot open ${rec.displayName}", e)
-            fail("A felvétel nem nyitható meg: ${e.message ?: e.javaClass.simpleName}")
+            Log.e(TAG, "cannot open ${rec.displayName}", e)           // the technical reason goes to the diagnostic report
+            fail("A felvétel nem nyitható meg: Music/DJMRec/${rec.displayName}. Nyisd meg egyszer a DJM-Rec-et a telefonon.")
             return
         }
         Log.i(TAG, "opening ${rec.displayName} at ${ms / 1000.0} s")
@@ -361,7 +378,7 @@ class BlindAutoService : MediaBrowserService() {
         val builder = PlaybackState.Builder()
         if (b != null && moment != null && errorMessage == null) {
             val given = b.gradeOf(moment.n)
-            for (g in BlindGrade.entries) {
+            for (g in BAR_ORDER) {
                 val name = (if (g == given) "● " else "") + "${g.symbol} ${g.label}"
                 builder.addCustomAction(PlaybackState.CustomAction.Builder(ACTION_PREFIX + g.id, name, iconOf(g, g == given)).build())
             }
@@ -501,7 +518,6 @@ class BlindAutoService : MediaBrowserService() {
     companion object {
         private const val TAG = "BlindAuto"
         private const val ROOT_ID = "blind"
-        private const val EMPTY_ROOT_ID = "blind-empty"
         private const val MOMENTS_SUFFIX = "/moments"
         private const val ACTION_PREFIX = "blind.grade."
         private const val PREFS = "blind_auto"
@@ -509,13 +525,9 @@ class BlindAutoService : MediaBrowserService() {
         private const val KEY_POSITION = "position."
         private const val TICK_MS = 500L
 
-        /** Android Auto, the car assistant / Google app (voice) and the system's media controls. */
-        private val TRUSTED_CALLERS = setOf(
-            "com.google.android.projection.gearhead",
-            "com.google.android.carassistant",
-            "com.google.android.googlequicksearchbox",
-            "com.android.systemui",
-        )
+        // The car fills the bar's free slots in this order: left of play, right of play, far left, far right (seen on
+        // the Android Automotive emulator). So this order reads ✗ ~ ⏸ ✓ ★ on screen: from worst to best.
+        private val BAR_ORDER = listOf(BlindGrade.MEH, BlindGrade.OK, BlindGrade.BAD, BlindGrade.STAR)
 
         private val ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
